@@ -15,6 +15,16 @@
 // >>> Audio : 1 = ON, 0 = OFF <<<
 #define ENABLE_AUDIO 1
 
+// >>> Stockage sauvegarde : LittleFS (interne) ou SD (microSD) <<<
+// ESP32-S3 utilise LittleFS par défaut (pas besoin de carte SD pour les sauvegardes)
+// Les autres cartes utilisent la SD comme avant.
+// Mettre à 1 pour forcer LittleFS, 0 pour forcer SD, ou laisser AUTO.
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+  #define USE_LITTLEFS_SAVE 1    // ESP32-S3 : LittleFS par défaut (16MB Flash)
+#else
+  #define USE_LITTLEFS_SAVE 0    // Autres : SD par défaut
+#endif
+
 // >>> Calibration tactile XPT2046 : 1 = ON, 0 = OFF <<<
 // Par défaut : 2432S022 = OFF (garde le réglage de base), ESP32S3 = OFF (pas de touch), autres = ON.
 #if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022 || DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
@@ -195,7 +205,8 @@ struct TouchAffine {
 };
 
 struct ButtonDeb;
-extern bool sdReady;
+extern bool sdReady;     // SD hardware ready (pour futur chargement d'assets)
+extern bool saveReady;   // save filesystem ready (LittleFS ou SD)
 
 // ================== INCLUDES ==================
 #include <Arduino.h>
@@ -207,6 +218,9 @@ extern bool sdReady;
 
 #include <SPI.h>
 #include <SD.h>
+#if USE_LITTLEFS_SAVE
+  #include <LittleFS.h>
+#endif
 #include <ArduinoJson.h>
 
 #include "DinoNames.h"
@@ -818,10 +832,10 @@ static bool touchLoadFromSD() {
   touchCal.ok = false;
   touchCal.skipped = false;
 
-  if (!sdReady) return false;
-  if (!SD.exists(TOUCH_CAL_FILE)) return false;
+  if (!saveReady) return false;
+  if (!saveFS.exists(TOUCH_CAL_FILE)) return false;
 
-  File f = SD.open(TOUCH_CAL_FILE, FILE_READ);
+  File f = saveFS.open(TOUCH_CAL_FILE, FILE_READ);
   if (!f) return false;
 
   StaticJsonDocument<256> doc;
@@ -851,7 +865,7 @@ static bool touchLoadFromSD() {
 }
 
 static bool touchSaveToSD() {
-  if (!sdReady) return false;
+  if (!saveReady) return false;
 
   touchCal.skipped = false;
 
@@ -863,19 +877,19 @@ static bool touchSaveToSD() {
   doc["d"] = touchCal.d; doc["e"] = touchCal.e; doc["f"] = touchCal.f;
 
   const char* TMP = "/touch_affine.tmp";
-  if (SD.exists(TMP)) SD.remove(TMP);
-  File f = SD.open(TMP, FILE_WRITE);
+  if (saveFS.exists(TMP)) saveFS.remove(TMP);
+  File f = saveFS.open(TMP, FILE_WRITE);
   if (!f) return false;
-  if (serializeJson(doc, f) == 0) { f.close(); SD.remove(TMP); return false; }
+  if (serializeJson(doc, f) == 0) { f.close(); saveFS.remove(TMP); return false; }
   f.flush(); f.close();
 
-  if (SD.exists(TOUCH_CAL_FILE)) SD.remove(TOUCH_CAL_FILE);
-  if (!SD.rename(TMP, TOUCH_CAL_FILE)) { SD.remove(TMP); return false; }
+  if (saveFS.exists(TOUCH_CAL_FILE)) saveFS.remove(TOUCH_CAL_FILE);
+  if (!saveFS.rename(TMP, TOUCH_CAL_FILE)) { saveFS.remove(TMP); return false; }
   return true;
 }
 
 static bool touchSaveSkipToSD() {
-  if (!sdReady) return false;
+  if (!saveReady) return false;
 
   touchCal.ok = false;
   touchCal.skipped = true;
@@ -886,14 +900,14 @@ static bool touchSaveSkipToSD() {
   doc["skip"] = 1;
 
   const char* TMP = "/touch_affine.tmp";
-  if (SD.exists(TMP)) SD.remove(TMP);
-  File f = SD.open(TMP, FILE_WRITE);
+  if (saveFS.exists(TMP)) saveFS.remove(TMP);
+  File f = saveFS.open(TMP, FILE_WRITE);
   if (!f) return false;
-  if (serializeJson(doc, f) == 0) { f.close(); SD.remove(TMP); return false; }
+  if (serializeJson(doc, f) == 0) { f.close(); saveFS.remove(TMP); return false; }
   f.flush(); f.close();
 
-  if (SD.exists(TOUCH_CAL_FILE)) SD.remove(TOUCH_CAL_FILE);
-  if (!SD.rename(TMP, TOUCH_CAL_FILE)) { SD.remove(TMP); return false; }
+  if (saveFS.exists(TOUCH_CAL_FILE)) saveFS.remove(TOUCH_CAL_FILE);
+  if (!saveFS.rename(TMP, TOUCH_CAL_FILE)) { saveFS.remove(TMP); return false; }
   return true;
 }
 
@@ -1991,7 +2005,19 @@ static void activityShowProgress(uint32_t now, const char* text, uint32_t durMs)
   activityText[sizeof(activityText)-1] = 0;
 }
 
-// ================== SAVE SYSTEM (microSD JSON A/B) ==================
+// ================== SAVE SYSTEM (LittleFS / microSD JSON A/B) ==================
+//
+// Architecture de stockage :
+//   - saveFS  : système de fichiers pour les SAUVEGARDES (LittleFS ou SD selon USE_LITTLEFS_SAVE)
+//   - sdReady : indique si la carte SD matérielle est initialisée (pour futur chargement d'assets)
+//   - saveReady : indique si le système de sauvegarde est prêt (LittleFS OU SD)
+//
+// Pourquoi garder les deux :
+//   - LittleFS = sauvegardes (petits fichiers JSON, pas besoin de hardware externe)
+//   - SD = futur chargement d'images/sons volumineux depuis microSD
+//
+
+// --- SD card hardware (gardé pour futur chargement d'assets) ---
 #if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
 static const int SD_SCK  = 36;   // ESP32-S3 SD pins
 static const int SD_MISO = 37;
@@ -2009,6 +2035,14 @@ static SPIClass sdSPI(HSPI);
 #endif
 bool sdReady = false;
 
+// --- Unified save filesystem abstraction ---
+bool saveReady = false;      // true si le FS de sauvegarde est prêt
+#if USE_LITTLEFS_SAVE
+  fs::FS& saveFS = LittleFS;  // sauvegardes sur Flash interne
+#else
+  fs::FS& saveFS = SD;        // sauvegardes sur carte SD
+#endif
+
 static const char* SAVE_A  = "/saveA.json";
 static const char* SAVE_B  = "/saveB.json";
 static const char* TMP_A   = "/saveA.tmp";
@@ -2023,23 +2057,56 @@ static bool nextSlotIsA = true;  // alterne A/B
 static inline int iClamp(int v, int lo, int hi){ if(v<lo) return lo; if(v>hi) return hi; return v; }
 static inline int fToI100(float f){ return iClamp((int)lroundf(f), 0, 100); }
 
+// Init SD hardware (pour SD saves OU futur chargement d'assets)
 static bool sdInit() {
   sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
   sdReady = SD.begin(SD_CS, sdSPI, 20000000);
   if (!sdReady) {
-    Serial.println("[SD] init FAIL");
+    Serial.println("[SD] init FAIL (pas de carte SD - normal si non utilisee)");
+  } else {
+    Serial.println("[SD] init OK");
+  }
+  return sdReady;
+}
+
+// Init LittleFS (stockage interne Flash)
+#if USE_LITTLEFS_SAVE
+static bool lfsInit() {
+  // formatOnFail=true : formate automatiquement au premier démarrage
+  if (!LittleFS.begin(true)) {
+    Serial.println("[LittleFS] init FAIL");
     return false;
   }
-  Serial.println("[SD] init OK");
+  Serial.println("[LittleFS] init OK");
   return true;
+}
+#endif
+
+// Init du système de sauvegarde (appelé dans setup)
+static void storageInit() {
+#if USE_LITTLEFS_SAVE
+  // Sauvegardes sur LittleFS (Flash interne) - pas besoin de SD pour sauver
+  saveReady = lfsInit();
+  // On tente quand même d'initialiser la SD pour futur usage (assets, etc.)
+  // Si pas de carte SD branchée, ce n'est pas grave.
+  sdInit();
+  Serial.printf("[STORAGE] Save=%s (LittleFS), SD=%s\n",
+                saveReady ? "OK" : "FAIL",
+                sdReady ? "OK" : "non connectee");
+#else
+  // Mode classique : tout sur SD
+  sdInit();
+  saveReady = sdReady;
+  Serial.printf("[STORAGE] Save=%s (SD)\n", saveReady ? "OK" : "FAIL");
+#endif
 }
 
 static bool readJsonFile(const char* path, StaticJsonDocument<768>& doc, uint32_t& outSeq) {
   outSeq = 0;
-  if (!sdReady) return false;
-  if (!SD.exists(path)) return false;
+  if (!saveReady) return false;
+  if (!saveFS.exists(path)) return false;
 
-  File f = SD.open(path, FILE_READ);
+  File f = saveFS.open(path, FILE_READ);
   if (!f) return false;
 
   DeserializationError err = deserializeJson(doc, f);
@@ -2098,7 +2165,7 @@ static void applyLoadedToRuntime(uint32_t now) {
 }
 
 static bool loadLatestSave(uint32_t now) {
-  if (!sdReady) return false;
+  if (!saveReady) return false;
 
   StaticJsonDocument<768> dA, dB;
   uint32_t sA=0, sB=0;
@@ -2194,24 +2261,24 @@ static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char
   ps["caca"]    = fToI100(pet.caca);
   ps["sante"]   = fToI100(pet.sante);
 
-  if (SD.exists(tmpPath)) SD.remove(tmpPath);
-  File f = SD.open(tmpPath, FILE_WRITE);
+  if (saveFS.exists(tmpPath)) saveFS.remove(tmpPath);
+  File f = saveFS.open(tmpPath, FILE_WRITE);
   if (!f) return false;
 
   if (serializeJson(doc, f) == 0) { f.close(); return false; }
   f.flush();
   f.close();
 
-  if (SD.exists(finalPath)) SD.remove(finalPath);
-  if (!SD.rename(tmpPath, finalPath)) {
-    SD.remove(tmpPath);
+  if (saveFS.exists(finalPath)) saveFS.remove(finalPath);
+  if (!saveFS.rename(tmpPath, finalPath)) {
+    saveFS.remove(tmpPath);
     return false;
   }
   return true;
 }
 
 static bool saveNow(uint32_t now, const char* why) {
-  if (!sdReady) return false;
+  if (!saveReady) return false;
 
   saveSeq++;
   const bool useA = nextSlotIsA;
@@ -2230,7 +2297,7 @@ static bool saveNow(uint32_t now, const char* why) {
 }
 
 static inline void saveMaybeEachMinute(uint32_t now) {
-  if (!sdReady) return;
+  if (!saveReady) return;
   if (lastSaveAt == 0) lastSaveAt = now;
   if ((uint32_t)(now - lastSaveAt) >= SAVE_EVERY_MS) {
     saveNow(now, "minute");
@@ -3138,11 +3205,11 @@ static void handleDeath(uint32_t now) {
 }
 
 static void eraseSavesAndRestart() {
-  if (sdReady) {
-    if (SD.exists(SAVE_A)) SD.remove(SAVE_A);
-    if (SD.exists(SAVE_B)) SD.remove(SAVE_B);
-    if (SD.exists(TMP_A)) SD.remove(TMP_A);
-    if (SD.exists(TMP_B)) SD.remove(TMP_B);
+  if (saveReady) {
+    if (saveFS.exists(SAVE_A)) saveFS.remove(SAVE_A);
+    if (saveFS.exists(SAVE_B)) saveFS.remove(SAVE_B);
+    if (saveFS.exists(TMP_A)) saveFS.remove(TMP_A);
+    if (saveFS.exists(TMP_B)) saveFS.remove(TMP_B);
   }
   delay(50);
   ESP.restart();
@@ -3353,7 +3420,7 @@ static void uiPressAction(uint32_t now) {
   if (phase == PHASE_RESTREADY) {
     resetToEgg(now);
     setMsg("Un nouvel oeuf...", now, 1500);
-    if (sdReady) saveNow(now, "rest_new");
+    if (saveReady) saveNow(now, "rest_new");
     return;
   }
 
@@ -3440,7 +3507,7 @@ if (nbtn != uiAliveCount()) return;
         setMsg("Audio total", now, 1500);
       }
 #if ENABLE_AUDIO
-      if (sdReady) saveNow(now, "audio");
+      if (saveReady) saveNow(now, "audio");
 #endif
       break;
     }
@@ -3558,7 +3625,7 @@ if (touch.stableDown) {
       setMsg(tmp, now, 1500);
       uiSpriteDirty = true;
       uiForceBands  = true;
-      if (sdReady) saveNow(now, "audio_vol");
+      if (saveReady) saveNow(now, "audio_vol");
       touch.longPressFired = true;
     }
   }
@@ -4039,8 +4106,8 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // init SD (HSPI)
-  sdInit();
+  // init storage : LittleFS (sauvegardes) + SD (futur assets)
+  storageInit();
 
   audioPwmSetup();
   audioSetTone(0, 0);
@@ -4075,7 +4142,7 @@ SH = tft.height();
 
 #if DISPLAY_PROFILE != DISPLAY_PROFILE_2432S022 && DISPLAY_PROFILE != DISPLAY_PROFILE_ESP32S3_ST7789
 #if ENABLE_TOUCH_CALIBRATION
-  bool touchReady = sdReady ? touchLoadFromSD() : false;
+  bool touchReady = saveReady ? touchLoadFromSD() : false;
   if (!touchReady) {
     bool canSkip = encoderButtonEnabled() || (BTN_OK >= 0);
     const int COUNTDOWN_SEC = 9;
@@ -4117,7 +4184,7 @@ SH = tft.height();
     }
 
     if (wantSkip) {
-      if (sdReady) {
+      if (saveReady) {
         touchSaveSkipToSD();
         touchReady = touchLoadFromSD();
       } else {
@@ -4141,7 +4208,7 @@ SH = tft.height();
         tft.print("Touch calib FAIL");
         while (true) delay(1000);
       }
-      if (sdReady) {
+      if (saveReady) {
         touchReady = touchLoadFromSD();
       } else {
         touchReady = touchCal.ok;
@@ -4208,11 +4275,11 @@ SH = tft.height();
   uint32_t now = millis();
 
   bool loaded = false;
-  if (sdReady) loaded = loadLatestSave(now);
+  if (saveReady) loaded = loadLatestSave(now);
 
   if (!loaded) {
     resetToEgg(now);
-    if (sdReady) saveNow(now, "boot_new");
+    if (saveReady) saveNow(now, "boot_new");
   }
 
   showHomeIntro(now);

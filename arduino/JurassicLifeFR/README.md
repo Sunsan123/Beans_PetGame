@@ -180,12 +180,39 @@ So it's normal if the display isn't identical across boards.
 
 ---
 
-## 9) 💾 Save: SD card required
+## 9) 💾 Save system: LittleFS (internal) or SD card
 
-In all cases, if you want a **save after power-off** for your dinosaur:
-➡️ you need a **microSD card**.
+### ESP32-S3 (default: LittleFS — no SD card needed for saves!) 🆕
 
+The ESP32-S3 version uses **LittleFS** (internal Flash filesystem) for game saves by default.
+- ✅ **No SD card needed** — saves persist in the 16MB Flash
+- ✅ **No extra hardware** — works out of the box
+- ✅ **Auto-format** on first boot — no manual setup required
+- The SD card hardware code is preserved for **future expansion** (loading images/sounds from SD)
+
+### Other boards (2432S022 / 2432S028 / ILI9341 DIY): SD card
+
+On standard ESP32 boards, saves are stored on a **microSD card** (as before).
 Without an SD card, you will lose the save after power-off/restart.
+
+### Configuration (line 22–27 in code)
+
+```cpp
+// ESP32-S3 uses LittleFS by default
+#define USE_LITTLEFS_SAVE 1    // 1 = LittleFS (internal), 0 = SD card
+
+// To force SD card on ESP32-S3, change to:
+#define USE_LITTLEFS_SAVE 0
+```
+
+### Storage architecture
+
+| | LittleFS (saveFS) | SD card (sdReady) |
+|---|---|---|
+| **Purpose** | Game saves (JSON) | Future: images, sounds, assets |
+| **Files** | `/saveA.json`, `/saveB.json` | Future expansion |
+| **Hardware** | Internal Flash (built-in) | microSD module (SPI) |
+| **Required** | Auto — no hardware needed | Only when you add assets |
 
 ---
 
@@ -235,7 +262,8 @@ Without an SD card, you will lose the save after power-off/restart.
 ### Required Libraries
 - **LovyanGFX** (install via Arduino Library Manager)
 - **ArduinoJson** (install via Arduino Library Manager)
-- **SD** (built-in)
+- **LittleFS** (built-in with ESP32 Arduino core — used for saves on ESP32-S3)
+- **SD** (built-in — kept for future asset loading)
 - **SPI** (built-in)
 
 ### Configuration in Code
