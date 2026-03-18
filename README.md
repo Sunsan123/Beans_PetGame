@@ -1,144 +1,144 @@
 # 🦖 JurassicLife
 
-JurassicLife is a **little virtual dinosaur** (Tamagotchi-style) living on an **ESP32 with a screen**.  
-It stays there, close to you, on your desk (or in your pocket if you build a case), ready to continue its life as soon as you power it on.
+JurassicLife 是一只**虚拟小恐龙**（类似拓麻歌子/电子宠物），运行在**带屏幕的 ESP32** 上。  
+它就安静地待在你桌上（或者做个外壳揣兜里也行），一通电就能继续它的小日子。
 
-The concept is simple:
-- you take care of your dino,
-- you watch it evolve,
-- and you make sure it doesn’t spend its entire life… doing poop. 💩
+玩法很简单：
+- 照顾你的小恐龙，
+- 看着它成长进化，
+- 确保它不会一辈子都在……拉粑粑。💩
 
-> You can **play right away**… or **modify everything**: sprites, animations, UI, rules, pins, etc.  
-> Basically: it’s made so you can have fun tinkering.
-
----
-
-## ▶️ Video (demo)
-[![JurassicLife – YouTube demo](https://img.youtube.com/vi/RPLaATQ_HNw/hqdefault.jpg)](https://youtu.be/RPLaATQ_HNw)
+> 你可以**直接开玩**……也可以**随意魔改**：精灵图、动画、界面、规则、引脚等等。  
+> 总之：就是让你尽情折腾用的。
 
 ---
 
-## 📌 Table of contents
-1. What is JurassicLife?
-2. Supported hardware (plug & play)
-3. Install / upload (simple)
-4. DIY mode (your own build)
-5. Actions (GIFs)
-6. Save (microSD required)
-7. Customize sprites / animations
-8. Repo structure
+## ▶️ 视频演示
+[![JurassicLife – YouTube 演示](https://img.youtube.com/vi/RPLaATQ_HNw/hqdefault.jpg)](https://youtu.be/RPLaATQ_HNw)
 
 ---
 
-## 1) What is JurassicLife?
-A small companion/game where you take care of a dinosaur:
-- feed it 🍖
-- give it a drink 💧
-- wash it 🧼
-- play with it 🎮
-- give it hugs 💖
-- and… handle the **“poop moments”** (yes, it’s part of the job).
+## 📌 目录
+1. JurassicLife 是什么？
+2. 支持的硬件（即插即用）
+3. 安装/烧录（简单版）
+4. DIY 模式（自己搭建）
+5. 动作展示（GIF）
+6. 存档（需要 microSD 卡）
+7. 自定义精灵图/动画
+8. 仓库结构
 
 ---
 
-## 2) ✅ Supported hardware (plug & play)
-JurassicLife is designed to be **very easy to upload** if you have a supported board:
+## 1) JurassicLife 是什么？
+一个照顾恐龙的小游戏/电子伙伴：
+- 给它喂食 🍖
+- 给它喝水 💧
+- 给它洗澡 🧼
+- 跟它玩耍 🎮
+- 给它抱抱 💖
+- 以及……处理**"拉粑粑"的时刻**（没错，这也是你的工作）。
+
+---
+
+## 2) ✅ 支持的硬件（即插即用）
+JurassicLife 的设计目标是**非常容易烧录**，只要你有支持的开发板：
 
 - **2432S022**
 - **2432S028**
-- **Classic ESP32 + ILI9341 320×240 screen** (DIY profile)
+- **经典 ESP32 + ILI9341 320×240 屏幕**（DIY 配置）
 
-👉 With a supported board: pick the right profile in the code, upload, and you’re good.
+👉 使用支持的开发板：在代码里选好对应的配置文件，烧录，搞定。
 
 ---
 
-## 3) ⬆️ Install / upload (simple)
-Arduino code is here:
+## 3) ⬆️ 安装/烧录（简单版）
+Arduino 代码在这里：
 - `arduino/JurassicLife/`
 
-And the configuration README (boards, audio, pins, encoder/buttons…) is here:
+配置说明（开发板、音频、引脚、编码器/按钮……）的 README 在这里：
 - `arduino/JurassicLife/README.md`
 
-➡️ Basically: change a few `#define` lines at the top of the file, then **upload** from Arduino IDE.
+➡️ 简单来说：修改文件顶部的几行 `#define`，然后用 Arduino IDE **烧录**即可。
 
 ---
 
-## 4) 🧪 DIY mode (your own build)
-You can also build your own setup:
-- your ESP32
-- your ILI9341 320×240 screen
-- your buttons / encoder
-- your 3D-printed case
-- your custom sprites
+## 4) 🧪 DIY 模式（自己搭建）
+你也可以自己搭建硬件：
+- 你自己的 ESP32
+- 你自己的 ILI9341 320×240 屏幕
+- 你自己的按钮/编码器
+- 你自己的 3D 打印外壳
+- 你自己的自定义精灵图
 
-This project is meant to be a **fun base** you can adapt however you want.
-
----
-
-## 5) 🎬 Actions (GIF preview)
-
-> This is the “daily life” part.  
-> Your dino isn’t complicated… but it has needs. (Like all of us.)
-
-### 🍖 Eat
-When it’s hungry, it looks at you like “I haven’t eaten in 3 minutes”.
-
-![Dino eats](screenshots/DinoMange.gif)
-
-### 💧 Drink
-Hydration = happy dino. And a happy dino breaks your karma a lot less.
-
-![Dino drinks](screenshots/Dinoboit.gif)
-
-### 🧼 Wash
-Because yes… after certain activities, the dino deserves a quick cleanup.
-
-![Dino washes](screenshots/Dinolave.gif)
-
-### 🎮 Play
-The dino needs to blow off steam. Otherwise it starts brooding. And a brooding dino… is suspicious.
-
-![Dino plays](screenshots/Dinojoue.gif)
-
-### 💩 Poop
-The most noble part of the project: poop management.  
-Don’t judge it. Help it. It’s your dino.
-
-![Dino poop](screenshots/Dinocaca.gif)
-
-### 💖 Hug
-The secret recipe to boost morale: a hug.  
-(And yes, it works even on dinosaurs.)
-
-![Dino hug](screenshots/Dinocalins.gif)
+这个项目本身就是一个**有趣的基础平台**，你可以随心所欲地改造它。
 
 ---
 
-## 6) 💾 Save: microSD required
-If you want to find your dinosaur again **after power-off**:
-➡️ you need a **microSD card**.
+## 5) 🎬 动作展示（GIF 预览）
 
-No microSD = no persistent save after restart.
+> 这里展示的是"日常生活"部分。  
+> 你的小恐龙不复杂……但它有需求。（跟我们一样。）
+
+### 🍖 吃东西
+饿的时候，它会用"我已经三分钟没吃东西了"的眼神看着你。
+
+![恐龙吃东西](screenshots/DinoMange.gif)
+
+### 💧 喝水
+补水 = 快乐恐龙。快乐的恐龙不会那么折腾你。
+
+![恐龙喝水](screenshots/Dinoboit.gif)
+
+### 🧼 洗澡
+因为嘛……在某些活动之后，恐龙确实需要清洁一下。
+
+![恐龙洗澡](screenshots/Dinolave.gif)
+
+### 🎮 玩耍
+恐龙需要发泄精力。不然它会开始胡思乱想。一只胡思乱想的恐龙……很可疑。
+
+![恐龙玩耍](screenshots/Dinojoue.gif)
+
+### 💩 拉粑粑
+本项目最崇高的部分：粑粑管理。  
+不要嫌弃它。帮帮它。这是你的恐龙。
+
+![恐龙拉粑粑](screenshots/Dinocaca.gif)
+
+### 💖 抱抱
+提振士气的秘密武器：一个拥抱。  
+（没错，对恐龙也管用。）
+
+![恐龙抱抱](screenshots/Dinocalins.gif)
 
 ---
 
-## 7) 🎨 Customize sprites / animations
-Want your own dino? Your own style? Your own scenery?
-Everything about sprites/animations + `.h` conversion scripts is here:
+## 6) 💾 存档：需要 microSD 卡
+如果你想在**断电后**还能找回你的恐龙：
+➡️ 你需要一张 **microSD 卡**。
+
+没有 microSD = 重启后没有持久化存档。
+
+---
+
+## 7) 🎨 自定义精灵图/动画
+想要你自己的恐龙？你自己的风格？你自己的场景？
+所有关于精灵图/动画以及 `.h` 转换脚本的内容都在这里：
 - `Sprites/`
 
-There’s a README there explaining how to create sprites and generate `.h` files.
+里面有一个 README 说明如何创建精灵图并生成 `.h` 文件。
 
 ---
 
-## 8) 🗂️ Repo structure (quick)
-- `arduino/` : Arduino code (the core of the project)
-- `Sprites/` : sprites + `.h` conversion scripts
-- `3DSTL/` : printable cases / parts
-- `screenshots/` : screenshots + diagrams + GIFs
-- `Modifencours/` : tests / WIP
-- `archive/` : old / legacy (if present)
+## 8) 🗂️ 仓库结构（快速一览）
+- `arduino/` ：Arduino 代码（项目核心）
+- `Sprites/` ：精灵图 + `.h` 转换脚本
+- `3DSTL/` ：可打印的外壳/零件
+- `screenshots/` ：截图 + 接线图 + GIF
+- `Modifencours/` ：测试 / 进行中的修改
+- `archive/` ：旧版/历史存档（如果有的话）
 
 ---
 
-🦖 Have fun, tinker, customize… and take care of your dino (even when it poops).
+🦖 尽情玩耍、折腾、定制……好好照顾你的小恐龙（就算它在拉粑粑的时候也要）。
