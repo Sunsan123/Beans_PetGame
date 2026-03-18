@@ -8,11 +8,12 @@
 // 接线参考 (ESP32-S3 GPIO -> 屏幕 8PIN):
 //   VCC  -> 3.3V
 //   GND  -> GND
-//   SCL  -> GPIO 12  (SPI CLK)
-//   SDA  -> GPIO 11  (SPI MOSI)
-//   RES  -> GPIO 9   (复位, 可选 -1 不接)
-//   DC   -> GPIO 13  (数据/命令)
-//   CS   -> GPIO 10  (片选)
+//   SCL  -> GPIO 18  (SPI CLK)
+//   SDA  -> GPIO 17  (SPI MOSI)
+//   MISO -> GPIO 6   (DMA 需要, 可不接物理线)
+//   RES  -> GPIO 4   (复位)
+//   DC   -> GPIO 15  (数据/命令)
+//   CS   -> GPIO 16  (片选)
 //   BLK  -> GPIO 14  (背光, 高电平点亮)
 //
 // SD 卡 (SPI):
@@ -25,14 +26,14 @@
 //   SPEAK -> GPIO 21
 //
 // 按钮 (3 按钮模式, 按需接线):
-//   BTN_LEFT  -> GPIO 4
+//   BTN_LEFT  -> GPIO 7
 //   BTN_RIGHT -> GPIO 5
-//   BTN_OK    -> GPIO 6
+//   BTN_OK    -> GPIO 8
 //
 // 旋转编码器 (可选, 和按钮二选一):
-//   ENC_A   -> GPIO 4
+//   ENC_A   -> GPIO 7
 //   ENC_B   -> GPIO 5
-//   ENC_BTN -> GPIO 6
+//   ENC_BTN -> GPIO 8
 //
 // ========================================================
 
@@ -41,14 +42,14 @@
 #endif
 #include <LovyanGFX.hpp>
 
-// ---- 屏幕引脚 ----
-#define S3_TFT_SCLK   12
-#define S3_TFT_MOSI   11
-#define S3_TFT_MISO   -1   // ST7789 模块无 MISO
-#define S3_TFT_DC     13
-#define S3_TFT_CS     10
-#define S3_TFT_RST     9
-#define S3_TFT_BL     14
+// ---- 屏幕引脚 (匹配用户已验证的 TFT_eSPI 接线) ----
+#define S3_TFT_SCLK   18   // SCL -> GPIO 18
+#define S3_TFT_MOSI   17   // SDA -> GPIO 17
+#define S3_TFT_MISO    6   // MISO -> GPIO 6 (DMA 需要)
+#define S3_TFT_DC     15   // DC  -> GPIO 15
+#define S3_TFT_CS     16   // CS  -> GPIO 16
+#define S3_TFT_RST     4   // RES -> GPIO 4
+#define S3_TFT_BL     14   // BLK -> GPIO 14 (背光)
 
 // ---- SD 卡引脚 ----
 #define S3_SD_SCK      36
@@ -60,9 +61,10 @@
 #define S3_SPEAK_PIN   21
 
 // ---- 输入引脚 (按钮模式, -1 = 禁用) ----
-#define S3_BTN_LEFT     4
+// 注意: GPIO 4/6 已被屏幕占用, 按钮改用 GPIO 7/5/8
+#define S3_BTN_LEFT     7
 #define S3_BTN_RIGHT    5
-#define S3_BTN_OK       6
+#define S3_BTN_OK       8
 
 // ---- 输入引脚 (编码器模式, 默认禁用, 和按钮二选一) ----
 #define S3_ENC_A       -1

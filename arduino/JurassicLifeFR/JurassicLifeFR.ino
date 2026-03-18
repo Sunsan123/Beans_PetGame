@@ -46,13 +46,14 @@
   static const int BTN_OK    = -1;
 #elif DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
   // ESP32-S3 : 3 boutons (par défaut), ou encoder (mettre BTN_* à -1 et ENC_* à vos GPIO)
+  // Note: GPIO 4/6 occupés par l'écran (RST/MISO), boutons déplacés sur GPIO 7/5/8
   static const int ENC_A   = -1;
   static const int ENC_B   = -1;
   static const int ENC_BTN = -1;
 
-  static const int BTN_LEFT  = 4;   // GPIO4
+  static const int BTN_LEFT  = 7;   // GPIO7  (anciennement GPIO4, maintenant pris par TFT_RST)
   static const int BTN_RIGHT = 5;   // GPIO5
-  static const int BTN_OK    = 6;   // GPIO6
+  static const int BTN_OK    = 8;   // GPIO8  (anciennement GPIO6, maintenant pris par TFT_MISO)
 #elif DISPLAY_PROFILE == DISPLAY_PROFILE_2432S028
   static const int ENC_A   = 22;   // A=22
   static const int ENC_B   = 27;   // B=27
@@ -84,8 +85,8 @@
 //   LCD SPI: SCLK=14, MOSI=13, MISO=12, DC=2, CS=15, BL=21
 //   Touch XPT2046 (soft-SPI): CLK=25, MOSI=32, MISO=39, CS=33, IRQ=36
 // ESP32S3_ST7789 (ESP32-S3 + ST7789 240x240 SPI, 1.54" IPS, pas de touch)
-//   LCD SPI: SCLK=12, MOSI=11, DC=13, CS=10, RST=9, BL=14 (PWM)
-//   Boutons: LEFT=4, RIGHT=5, OK=6
+//   LCD SPI: SCLK=18, MOSI=17, MISO=6, DC=15, CS=16, RST=4, BL=14 (PWM)
+//   Boutons: LEFT=7, RIGHT=5, OK=8
 //   Audio: SPEAK=21
 //   SD: SCK=36, MISO=37, MOSI=35, CS=38
 // Entrées (optionnelles): encoder = ENC_A/ENC_B/ENC_BTN, boutons = BTN_LEFT/BTN_RIGHT/BTN_OK
