@@ -1,4 +1,5 @@
-// tamadinov4.ino - ESP32 WROOM + CYD 2432S028 (ILI9341) + LovyanGFX
+// tamadinov4.ino - ESP32 WROOM / ESP32-S3 + LovyanGFX
+// Supported: 2432S022 (ST7789), 2432S028 (ILI9341), ILI9341 DIY, ESP32-S3 + ST7789 240x240
 #include <stdint.h>
 
 // ================== CONFIG RAPIDE (à modifier en premier) ==================
@@ -6,16 +7,17 @@
 #define DISPLAY_PROFILE_2432S022 1   // ST7789 + cap touch I2C
 #define DISPLAY_PROFILE_2432S028 2   // ILI9341 + XPT2046 (soft-SPI)
 #define DISPLAY_PROFILE_ILI9341_320x240 3 // ILI9341 320x240 + XPT2046 (soft-SPI)
+#define DISPLAY_PROFILE_ESP32S3_ST7789  4 // ESP32-S3 + ST7789 240x240 SPI (1.54" IPS)
 
 // >>> Réglage simple : modifier la carte ici <<<
-#define DISPLAY_PROFILE DISPLAY_PROFILE_2432S022   // DISPLAY_PROFILE_2432S022   ou   DISPLAY_PROFILE_2432S028   ou   DISPLAY_PROFILE_ILI9341_320x240
+#define DISPLAY_PROFILE DISPLAY_PROFILE_ESP32S3_ST7789   // DISPLAY_PROFILE_2432S022 / DISPLAY_PROFILE_2432S028 / DISPLAY_PROFILE_ILI9341_320x240 / DISPLAY_PROFILE_ESP32S3_ST7789
 
 // >>> Audio : 1 = ON, 0 = OFF <<<
 #define ENABLE_AUDIO 1
 
 // >>> Calibration tactile XPT2046 : 1 = ON, 0 = OFF <<<
-// Par défaut : 2432S022 = OFF (garde le réglage de base), autres = ON.
-#if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
+// Par défaut : 2432S022 = OFF (garde le réglage de base), ESP32S3 = OFF (pas de touch), autres = ON.
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022 || DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
   #define ENABLE_TOUCH_CALIBRATION 0
 #else
   #define ENABLE_TOUCH_CALIBRATION 1
@@ -32,6 +34,15 @@
   static const int BTN_LEFT  = -1;
   static const int BTN_RIGHT = -1;
   static const int BTN_OK    = -1;
+#elif DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+  // ESP32-S3 : 3 boutons (par défaut), ou encoder (mettre BTN_* à -1 et ENC_* à vos GPIO)
+  static const int ENC_A   = -1;
+  static const int ENC_B   = -1;
+  static const int ENC_BTN = -1;
+
+  static const int BTN_LEFT  = 4;   // GPIO4
+  static const int BTN_RIGHT = 5;   // GPIO5
+  static const int BTN_OK    = 6;   // GPIO6
 #elif DISPLAY_PROFILE == DISPLAY_PROFILE_2432S028
   static const int ENC_A   = 22;   // A=22
   static const int ENC_B   = 27;   // B=27
@@ -62,11 +73,17 @@
 // ILI9341_320x240 (TFT classique + XPT2046)
 //   LCD SPI: SCLK=14, MOSI=13, MISO=12, DC=2, CS=15, BL=21
 //   Touch XPT2046 (soft-SPI): CLK=25, MOSI=32, MISO=39, CS=33, IRQ=36
+// ESP32S3_ST7789 (ESP32-S3 + ST7789 240x240 SPI, 1.54" IPS, pas de touch)
+//   LCD SPI: SCLK=12, MOSI=11, DC=13, CS=10, RST=9, BL=14 (PWM)
+//   Boutons: LEFT=4, RIGHT=5, OK=6
+//   Audio: SPEAK=21
+//   SD: SCK=36, MISO=37, MOSI=35, CS=38
 // Entrées (optionnelles): encoder = ENC_A/ENC_B/ENC_BTN, boutons = BTN_LEFT/BTN_RIGHT/BTN_OK
-// SD (toutes cartes): SCK=18, MISO=19, MOSI=23, CS=5// SD (par carte)
+// SD (par carte):
 // 2432S022: SCK=18, MISO=19, MOSI=23, CS=5
 // 2432S028: SCK=18, MISO=19, MOSI=23, CS=5
 // ILI9341_320x240: à adapter si besoin
+// ESP32S3_ST7789: SCK=36, MISO=37, MOSI=35, CS=38
 // ================== ENUMS (Arduino prototype fix) ==================
 enum AgeStage : uint8_t { AGE_JUNIOR, AGE_ADULTE, AGE_SENIOR };
 
@@ -182,6 +199,7 @@ extern bool sdReady;
 
 // ================== INCLUDES ==================
 #include <Arduino.h>
+#define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 #include <ctype.h>
 #include <math.h>
@@ -242,9 +260,16 @@ extern bool sdReady;
 #define USE_TOP_QUICK_BUTTONS (DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022)
 
 // Rotation écran (0..3). Pour un retournement 180°, ajouter 2 (ex: 1 -> 3).
+// ESP32-S3 240x240 : ROT=0 (carré, pas besoin de rotation).
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+static constexpr int ROT = 0;
+static constexpr bool FLIP_X = false;
+static constexpr bool FLIP_Y = false;
+#else
 static constexpr int ROT = 3;
 static constexpr bool FLIP_X = true;
 static constexpr bool FLIP_Y = true;
+#endif
 
 static const int   SIM_SPEED = 1;
 
@@ -388,7 +413,17 @@ static const uint16_t KEY_SWAP = 0x1FF8;
 #define FLAQUE_IMG flaque_eau_60x25
 
 // ================== ÉCRAN ==================
-#if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+// === ESP32-S3 + ST7789 240×240 SPI (1.54" IPS, pas de touch) ===
+#include "board_esp32s3_st7789.hpp"
+
+LGFX_ESP32S3_ST7789 tft;
+
+// pas de touch sur ce module
+static constexpr int RAW_W = 240;
+static constexpr int RAW_H = 240;
+
+#elif DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
 #include <Wire.h>
 #include <bb_captouch.h>
 
@@ -561,7 +596,14 @@ static inline void mapTouchToScreen(uint16_t rx, uint16_t ry, uint16_t &x, uint1
   y = yy;
 }
 
-#if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+// ESP32-S3 : pas de touch, contrôle par boutons uniquement
+static inline bool readTouchScreen(int16_t &sx, int16_t &sy) {
+  (void)sx; (void)sy;
+  return false;   // jamais de touch
+}
+
+#elif DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
 // Lecture tactile "prête UI" (cap touch)
 static inline bool readTouchScreen(int16_t &sx, int16_t &sy) {
   int n = g_touch.getSamples(&g_ti);
@@ -1014,6 +1056,9 @@ static const int BAND_H = 30;
 LGFX_Sprite band(&tft);
 
 // ================== MONDE ==================
+// SW/SH sont mis à jour dans setup() via tft.width()/tft.height()
+// 240x240 (ESP32-S3) : SW=240, SH=240
+// 320x240 (autres)   : SW=320, SH=240
 static int SW = 320, SH = 240;
 static const int GROUND_Y = 170;
 
@@ -1061,7 +1106,11 @@ struct PetStats {
 static GamePhase phase = PHASE_EGG;
 
 // ================== AUDIO ==================
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+static const int SPEAK_PIN = 21;   // ESP32-S3: GPIO21
+#else
 static const int SPEAK_PIN = 26;
+#endif
 static const int AUDIO_PWM_CHANNEL = 6;
 static const int AUDIO_PWM_BITS = 10;
 static const uint16_t AUDIO_DUTY_NORMAL = 320;
@@ -1943,13 +1992,21 @@ static void activityShowProgress(uint32_t now, const char* text, uint32_t durMs)
 }
 
 // ================== SAVE SYSTEM (microSD JSON A/B) ==================
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+static const int SD_SCK  = 36;   // ESP32-S3 SD pins
+static const int SD_MISO = 37;
+static const int SD_MOSI = 35;
+static const int SD_CS   = 38;
+// ESP32-S3 : SPI3_HOST (équivalent de HSPI sur S3)
+static SPIClass sdSPI(SPI3_HOST);
+#else
 static const int SD_SCK  = 18;
 static const int SD_MISO = 19;
 static const int SD_MOSI = 23;
 static const int SD_CS   = 5;
-
 // Bus SD séparé (HSPI) pour éviter conflit avec l'écran (VSPI pins custom)
 static SPIClass sdSPI(HSPI);
+#endif
 bool sdReady = false;
 
 static const char* SAVE_A  = "/saveA.json";
@@ -3990,7 +4047,10 @@ void setup() {
 
 tft.init();
 tft.setRotation(ROT);
-#if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+// ESP32-S3 : backlight géré par LovyanGFX (PWM), pas de touch
+tft.setBrightness(255);
+#elif DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
 Wire.begin(TOUCH_SDA, TOUCH_SCL);
 Wire.setClock(400000);
 g_touch.init(TOUCH_SDA, TOUCH_SCL, -1, -1);
@@ -4013,7 +4073,7 @@ SH = tft.height();
   if (BTN_RIGHT >= 0) pinMode(BTN_RIGHT, INPUT_PULLUP);
   if (BTN_OK >= 0) pinMode(BTN_OK, INPUT_PULLUP);
 
-#if DISPLAY_PROFILE != DISPLAY_PROFILE_2432S022
+#if DISPLAY_PROFILE != DISPLAY_PROFILE_2432S022 && DISPLAY_PROFILE != DISPLAY_PROFILE_ESP32S3_ST7789
 #if ENABLE_TOUCH_CALIBRATION
   bool touchReady = sdReady ? touchLoadFromSD() : false;
   if (!touchReady) {
