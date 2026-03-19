@@ -1,4 +1,4 @@
-# 🦖 JurassicLife (Arduino / ESP32)
+# BeansPetGame (Arduino / ESP32)
 
 This code is made to run on:
 - **2432S022**

@@ -1,7 +1,8 @@
-// JurassicLifeCN.ino - ESP32 WROOM / ESP32-S3 + LovyanGFX (中文版)
+// BeansPetGameCN.ino - ESP32 WROOM / ESP32-S3 + LovyanGFX (中文版)
 // 支持: 2432S022 (ST7789), 2432S028 (ILI9341), ILI9341 DIY, ESP32-S3 + ST7789 240x240
-// 基于 JurassicLifeFR 法语版，UI完全翻译为简体中文
+// 基于 BeansPetGame 世界观中文版本，UI 语境调整为罗德岛龙泡泡照护终端
 #include <stdint.h>
+#include <Wire.h>
 
 // ================== CONFIG RAPIDE (à modifier en premier) ==================
 // --- Choix carte/écran ---
@@ -336,17 +337,11 @@ static const float AWAKE_HUNGER_D  = -2.0f;
 static const float AWAKE_THIRST_D  = -3.0f;
 static const float AWAKE_HYGIENE_D = -1.0f;
 static const float AWAKE_MOOD_D    = -1.0f;
-static const float AWAKE_ENERGY_D  = -2.0f;
 static const float AWAKE_FATIGUE_D = -2.0f;
 static const float AWAKE_LOVE_D    = -0.5f;
 
 // multiplicateur global de baisse de santé (1.0 = inchangé)
 static const float HEALTH_TICK_MULT = 1.0f;
-
-// caca
-static const float AWAKE_POOP_D    = +1.0f;
-static const float SLEEP_POOP_D    = +0.5f;
-static const int   POOP_STRESS_THR = 80;
 
 // durées base actions (toujours utiles pour balancing même si wash/play passent en mini-jeu)
 static const uint32_t BASE_EAT_MS   = 20000;
@@ -366,40 +361,34 @@ static const uint32_t CD_HUG_MS   = 1UL  * 60UL * 1000UL;
 
 // effets actions (avant gain mul)
 static const float EAT_HUNGER   = +30;
-static const float EAT_ENERGY   = +5;
 static const float EAT_FATIGUE  = -5;
 static const float EAT_THIRST   = -5;
-static const float EAT_POOP     = +25;
+static const float EAT_MOOD     = +2;
 
 static const float DRINK_THIRST = +35;
-static const float DRINK_ENERGY = +2;
-static const float DRINK_FATIGUE= 0;
-static const float DRINK_POOP   = +5;
+static const float DRINK_FATIGUE= +2;
+static const float DRINK_MOOD   = +1;
 
 static const float WASH_HYGIENE = +40;
 static const float WASH_MOOD    = +5;
-static const float WASH_ENERGY  = -5;
 static const float WASH_FATIGUE = -5;
 
 static const float PLAY_MOOD    = +25;
-static const float PLAY_ENERGY  = -20;
 static const float PLAY_FATIGUE = -25;
 static const float PLAY_HUNGER  = -10;
 static const float PLAY_THIRST  = -10;
+static const float PLAY_LOVE    = +8;
 
-static const float POOP_SET     = 0;
-static const float POOP_HYGIENE = -15;
-static const float POOP_MOOD    = +2;
-static const float POOP_ENERGY  = -3;
-static const float POOP_FATIGUE = -3;
+static const float CLEAN_HYGIENE = +28;
+static const float CLEAN_MOOD    = +8;
+static const float CLEAN_LOVE    = +4;
+static const float CLEAN_FATIGUE = -4;
 
 static const float HUG_LOVE     = +25;
-static const float HUG_MOOD     = +5;
-static const float HUG_FATIGUE  = +2;
-static const float HUG_ENERGY   = -2;
+static const float HUG_MOOD     = +8;
+static const float HUG_FATIGUE  = -2;
 
 static const float SLEEP_GAIN_PER_SEC = 0.1f;
-static const int   POOP_ACCIDENT_AT = 100;
 
 // ================== TRANSPARENCE KEY ==================
 static inline uint16_t swap16(uint16_t v) { return (uint16_t)((v << 8) | (v >> 8)); }
@@ -443,7 +432,6 @@ static constexpr int RAW_W = 240;
 static constexpr int RAW_H = 240;
 
 #elif DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
-#include <Wire.h>
 #include <bb_captouch.h>
 
 static constexpr int TOUCH_SDA = 21;
@@ -582,6 +570,21 @@ static constexpr int RAW_H = 240;
 static constexpr int RAW_W = 240;
 static constexpr int RAW_H = 320;
 #endif
+#endif
+
+// ================== RTC I2C DEFAULTS ==================
+// 2432S022: partage le bus I2C du tactile.
+// ESP32-S3: par defaut, prevoir DS3231 sur GPIO9(GPIO SDA) / GPIO10(GPIO SCL).
+// Autres ESP32: GPIO21 / GPIO22.
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
+static constexpr int RTC_SDA = TOUCH_SDA;
+static constexpr int RTC_SCL = TOUCH_SCL;
+#elif DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
+static constexpr int RTC_SDA = 9;
+static constexpr int RTC_SCL = 10;
+#else
+static constexpr int RTC_SDA = 21;
+static constexpr int RTC_SCL = 22;
 #endif
 
 static inline uint16_t clampU16(int v, int lo, int hi) {
@@ -1107,10 +1110,8 @@ struct PetStats {
   float soif    = 60;
   float hygiene = 80;
   float humeur  = 60;
-  float energie = 100;
   float fatigue = 100;
   float amour   = 60;
-  float caca    = 0;
 
   float sante   = 80;
   uint32_t ageMin = 0;
@@ -1120,8 +1121,6 @@ struct PetStats {
 
   // progression d'évolution (minutes validées NON consécutives)
   uint32_t evolveProgressMin = 0;
-
-  bool poopAccidentLatched = false;
 } pet;
 
 static GamePhase phase = PHASE_EGG;
@@ -1400,10 +1399,8 @@ static uint8_t healthCriticalCount() {
   if (pet.soif    < 15) count++;
   if (pet.hygiene < 15) count++;
   if (pet.humeur  < 10) count++;
-  if (pet.energie < 10) count++;
   if (pet.fatigue < 10) count++;
   if (pet.amour   < 10) count++;
-  if (pet.caca >= 95) count++;
   return count;
 }
 
@@ -1435,19 +1432,18 @@ static const uint16_t COL_FAIM    = 0xFD20;
 static const uint16_t COL_SOIF    = 0x03FF;
 static const uint16_t COL_HYGIENE = 0x07FF;
 static const uint16_t COL_HUMEUR  = 0xFFE0;
-static const uint16_t COL_ENERGIE = 0x001F;
 static const uint16_t COL_FATIGUE = 0x8410;
 static const uint16_t COL_AMOUR2  = 0xF8B2;
-static const uint16_t COL_CACA    = 0xA145;
+static const uint16_t COL_QINGLI  = 0x97E0;
 
 static inline uint16_t btnColorForAction(UiAction a) {
   switch (a) {
-    case UI_REPOS:  return COL_ENERGIE;
+    case UI_REPOS:  return COL_FATIGUE;
     case UI_MANGER: return COL_FAIM;
     case UI_BOIRE:  return COL_SOIF;
     case UI_LAVER:  return COL_HYGIENE;
     case UI_JOUER:  return COL_HUMEUR;
-    case UI_CACA:   return COL_CACA;
+    case UI_CACA:   return COL_QINGLI;
     case UI_CALIN:  return COL_AMOUR2;
     case UI_AUDIO:  return 0x7BEF;
     default:        return TFT_WHITE;
@@ -1456,21 +1452,21 @@ static inline uint16_t btnColorForAction(UiAction a) {
 static inline const char* btnLabel(UiAction a) {
   switch (a) {
     case UI_REPOS:  return "\xe4\xbc\x91\xe6\x81\xaf";   // 休息
-    case UI_MANGER: return "\xe5\x90\x83";               // 吃
-    case UI_BOIRE:  return "\xe5\x96\x9d";               // 喝
-    case UI_LAVER:  return "\xe6\xb4\x97";               // 洗
-    case UI_JOUER:  return "\xe7\x8e\xa9";               // 玩
-    case UI_CACA:   return "\xe4\xbe\xbf\xe4\xbe\xbf";   // 便便
-    case UI_CALIN:  return "\xe6\x8a\xb1\xe6\x8a\xb1";   // 抱抱
+    case UI_MANGER: return "\xe5\x96\x82\xe9\xa3\x9f";   // 喂食
+    case UI_BOIRE:  return "\xe5\x96\x9d\xe6\xb0\xb4";   // 喝水
+    case UI_LAVER:  return "\xe6\xb4\x97\xe6\xbe\xa1";   // 洗澡
+    case UI_JOUER:  return "\xe7\x8e\xa9\xe8\x80\x8d";   // 玩耍
+    case UI_CACA:   return "\xe6\xb8\x85\xe7\x90\x86";   // 清理
+    case UI_CALIN:  return "\xe4\xba\x92\xe5\x8a\xa8";   // 互动
     case UI_AUDIO:  return "\xe5\xa3\xb0\xe9\x9f\xb3";   // 声音
     default:        return "?";
   }
 }
 static inline const char* stageLabel(AgeStage s) {
   switch (s) {
-    case AGE_JUNIOR: return "\xe5\xb9\xbc\xe5\xb9\xb4";  // 幼年
-    case AGE_ADULTE: return "\xe6\x88\x90\xe5\xb9\xb4";  // 成年
-    case AGE_SENIOR: return "\xe8\x80\x81\xe5\xb9\xb4";  // 老年
+    case AGE_JUNIOR: return "\xe5\xb9\xbc\xe4\xbd\x93";      // 幼体
+    case AGE_ADULTE: return "\xe6\x88\x90\xe4\xbd\x93";      // 成体
+    case AGE_SENIOR: return "\xe7\xa8\xb3\xe5\xae\x9a\xe4\xbd\x93";  // 稳定体
     default:         return "?";
   }
 }
@@ -1539,8 +1535,10 @@ static const uint32_t ACTIVITY_UI_REFRESH_MS = 120; // ~8 fps
 static bool showMsg = false;
 static uint32_t msgUntil = 0;
 static char msgText[64] = {0};
+static bool offlineSettlementInProgress = false;
 
 static void setMsg(const char* s, uint32_t now, uint32_t dur=1500) {
+  if (offlineSettlementInProgress) return;
   strncpy(msgText, s, sizeof(msgText)-1);
   msgText[sizeof(msgText)-1] = 0;
   showMsg = true;
@@ -1875,18 +1873,18 @@ static inline int uiButtonWidth(uint8_t nbtn) {
   return bw;
 }
 static inline const char* uiSingleLabel() {
-  if (phase == PHASE_EGG) return "\xe5\xad\xb5\xe5\x8c\x96";           // 孵化
+  if (phase == PHASE_EGG) return "\xe5\xbc\x80\xe5\xa7\x8b\xe5\xad\xb5\xe5\x8c\x96";           // 开始孵化
   if (phase == PHASE_HATCHING) return "...";
-  if (phase == PHASE_RESTREADY) return "\xe9\x87\x8d\xe6\x96\xb0\xe5\xbc\x80\xe5\xa7\x8b"; // 重新开始
-  if (phase == PHASE_TOMB) return "\xe9\x87\x8d\xe6\x96\xb0\xe5\xbc\x80\xe5\xa7\x8b";      // 重新开始
-  if (state == ST_SLEEP) return "\xe5\x94\xa4\xe9\x86\x92";             // 唤醒
+  if (phase == PHASE_RESTREADY) return "\xe9\x87\x8d\xe6\x96\xb0\xe6\x94\xb6\xe5\xae\xb9"; // 重新收容
+  if (phase == PHASE_TOMB) return "\xe9\x87\x8d\xe6\x96\xb0\xe6\x94\xb6\xe5\xae\xb9";      // 重新收容
+  if (state == ST_SLEEP) return "\xe7\xbb\x93\xe6\x9d\x9f\xe4\xbc\x91\xe6\x95\xb4";             // 结束休整
   return "?";
 }
 static inline uint16_t uiSingleColor() {
   if (phase == PHASE_EGG) return 0x07E0;
   if (phase == PHASE_RESTREADY) return 0x07E0;
   if (phase == PHASE_TOMB) return TFT_RED;
-  if (state == ST_SLEEP) return COL_ENERGIE;
+  if (state == ST_SLEEP) return COL_FATIGUE;
   return 0xC618;
 }
 
@@ -2017,6 +2015,7 @@ static void activityStopIfFree(uint32_t now) {
 
 // modes speciaux
 static void activityShowFull(uint32_t now, const char* text) {
+  if (offlineSettlementInProgress) return;
   activityVisible = true;
   activityStart = now;
   activityEnd   = now; // end<=start => progress=100
@@ -2075,13 +2074,204 @@ static const char* TMP_A   = "/saveA.tmp";
 static const char* TMP_B   = "/saveB.tmp";
 
 static const uint32_t SAVE_EVERY_MS = 60000UL;
+static const uint32_t OFFLINE_SETTLE_CAP_MIN = 24UL * 60UL;
+static const uint32_t OFFLINE_REPORT_MS = 3200UL;
 
 static uint32_t saveSeq = 0;
 static uint32_t lastSaveAt = 0;
 static bool nextSlotIsA = true;  // alterne A/B
+static bool savedTimeValid = false;
+static uint32_t savedLastUnixTime = 0;
+static bool savedWasSleeping = false;
+static char bootOfflineNotice[64] = {0};
 
 static inline int iClamp(int v, int lo, int hi){ if(v<lo) return lo; if(v>hi) return hi; return v; }
 static inline int fToI100(float f){ return iClamp((int)lroundf(f), 0, 100); }
+
+struct OfflineSettlementInfo {
+  bool checked = false;
+  bool applied = false;
+  bool skippedNoClock = false;
+  bool skippedNoSavedTime = false;
+  bool skippedInvalidDelta = false;
+  bool capped = false;
+  uint32_t elapsedSec = 0;
+  uint32_t appliedMin = 0;
+  bool petDied = false;
+};
+static OfflineSettlementInfo offlineInfo;
+
+// ================== TIME SOURCE (RTC-ready skeleton) ==================
+// DS3231 auto-detect over I2C. If no RTC is present or time is invalid, the game
+// falls back to "no offline settlement" without breaking saves or gameplay.
+static constexpr uint8_t RTC_DS3231_ADDR = 0x68;
+static constexpr uint32_t RTC_I2C_HZ = 400000UL;
+static bool rtcInitTried = false;
+static bool rtcWireReady = false;
+static bool rtcPresent = false;
+static bool rtcTimeValid = false;
+
+static inline uint8_t bcdToDec(uint8_t v) {
+  return (uint8_t)(((v >> 4) * 10U) + (v & 0x0F));
+}
+
+static inline bool isLeapYear(int year) {
+  return ((year % 4) == 0 && (year % 100) != 0) || ((year % 400) == 0);
+}
+
+static inline uint8_t daysInMonth(int year, int month) {
+  static const uint8_t kDays[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+  if (month < 1 || month > 12) return 0;
+  if (month == 2 && isLeapYear(year)) return 29;
+  return kDays[month - 1];
+}
+
+static int32_t daysFromCivil(int year, unsigned month, unsigned day) {
+  year -= (month <= 2) ? 1 : 0;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yoe = (unsigned)(year - era * 400);
+  const int monthPrime = (int)month + (month > 2 ? -3 : 9);
+  const unsigned doy = (153U * (unsigned)monthPrime + 2U) / 5U + day - 1U;
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  return era * 146097 + (int32_t)doe - 719468;
+}
+
+static bool rtcEnsureWire() {
+  if (rtcWireReady) return true;
+
+#if DISPLAY_PROFILE == DISPLAY_PROFILE_2432S022
+  Wire.setClock(RTC_I2C_HZ);
+  rtcWireReady = true;
+#else
+  Wire.begin(RTC_SDA, RTC_SCL);
+  Wire.setClock(RTC_I2C_HZ);
+  rtcWireReady = true;
+#endif
+
+  return true;
+}
+
+static bool rtcReadRegisters(uint8_t reg, uint8_t* dst, size_t len) {
+  if (!rtcEnsureWire()) return false;
+
+  Wire.beginTransmission(RTC_DS3231_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+
+  size_t got = Wire.requestFrom((int)RTC_DS3231_ADDR, (int)len);
+  if (got != len) {
+    while (Wire.available()) Wire.read();
+    return false;
+  }
+
+  for (size_t i = 0; i < len; ++i) {
+    dst[i] = (uint8_t)Wire.read();
+  }
+  return true;
+}
+
+static bool rtcProbeDevice() {
+  if (!rtcEnsureWire()) return false;
+  Wire.beginTransmission(RTC_DS3231_ADDR);
+  return Wire.endTransmission() == 0;
+}
+
+static bool rtcReadUnixTimeFromChip(uint32_t& outUnixTime) {
+  outUnixTime = 0;
+
+  uint8_t status = 0;
+  if (!rtcReadRegisters(0x0F, &status, 1)) return false;
+  if (status & 0x80U) return false;  // OSF: oscillator stopped, time not trustworthy.
+
+  uint8_t raw[7] = {0};
+  if (!rtcReadRegisters(0x00, raw, sizeof(raw))) return false;
+
+  int second = bcdToDec(raw[0] & 0x7F);
+  int minute = bcdToDec(raw[1] & 0x7F);
+
+  int hour = 0;
+  if (raw[2] & 0x40U) {
+    hour = bcdToDec(raw[2] & 0x1F);
+    bool pm = (raw[2] & 0x20U) != 0;
+    if (hour == 12) hour = 0;
+    if (pm) hour += 12;
+  } else {
+    hour = bcdToDec(raw[2] & 0x3F);
+  }
+
+  int day = bcdToDec(raw[4] & 0x3F);
+  int month = bcdToDec(raw[5] & 0x1F);
+  int year = 2000 + bcdToDec(raw[6]);
+
+  if (second > 59 || minute > 59 || hour > 23) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > (int)daysInMonth(year, month)) return false;
+
+  int32_t days = daysFromCivil(year, (unsigned)month, (unsigned)day);
+  if (days < 0) return false;
+
+  uint32_t seconds = (uint32_t)second + (uint32_t)minute * 60UL + (uint32_t)hour * 3600UL;
+  outUnixTime = (uint32_t)days * 86400UL + seconds;
+  return true;
+}
+
+static bool timeSourceInit() {
+  if (rtcInitTried) return rtcPresent && rtcTimeValid;
+  rtcInitTried = true;
+
+  rtcPresent = rtcProbeDevice();
+  if (!rtcPresent) {
+    Serial.printf("[TIME] DS3231 not found on I2C SDA=%d SCL=%d\n", RTC_SDA, RTC_SCL);
+    rtcTimeValid = false;
+    return false;
+  }
+
+  uint32_t unixTime = 0;
+  rtcTimeValid = rtcReadUnixTimeFromChip(unixTime);
+  if (rtcTimeValid) {
+    Serial.printf("[TIME] DS3231 detected, unix=%lu\n", (unsigned long)unixTime);
+  } else {
+    Serial.println("[TIME] DS3231 detected but time is invalid; set RTC first");
+  }
+  return rtcTimeValid;
+}
+
+static bool readCurrentUnixTime(uint32_t& outUnixTime) {
+  if (!rtcInitTried) timeSourceInit();
+  if (!rtcPresent) {
+    outUnixTime = 0;
+    return false;
+  }
+
+  rtcTimeValid = rtcReadUnixTimeFromChip(outUnixTime);
+  return rtcTimeValid;
+}
+
+static inline bool runtimeSleepingFlag() {
+  return (state == ST_SLEEP) || (task.active && task.kind == TASK_SLEEP);
+}
+
+static void buildOfflineNotice() {
+  bootOfflineNotice[0] = 0;
+
+  if (!offlineInfo.checked) return;
+
+  if (offlineInfo.skippedNoClock) {
+    strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97\xe5\xb7\xb2\xe8\xb7\xb3\xe8\xbf\x87: \xe6\x97\xa0RTC\xe6\x97\xb6\xe9\x97\xb4", sizeof(bootOfflineNotice) - 1);
+  } else if (offlineInfo.skippedNoSavedTime) {
+    strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97\xe5\xbe\x85\xe5\x91\xbd: \xe9\xa6\x96\xe6\xac\xa1\xe8\xae\xb0\xe5\xbd\x95\xe6\x97\xb6\xe9\x97\xb4", sizeof(bootOfflineNotice) - 1);
+  } else if (offlineInfo.skippedInvalidDelta) {
+    strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97\xe5\xb7\xb2\xe8\xb7\xb3\xe8\xbf\x87: \xe6\x97\xb6\xe9\x97\xb4\xe5\xbc\x82\xe5\xb8\xb8", sizeof(bootOfflineNotice) - 1);
+  } else if (offlineInfo.applied) {
+    snprintf(bootOfflineNotice, sizeof(bootOfflineNotice), "\xe7\xa6\xbb\xe7\xba\xbf%lu\xe5\x88\x86\xe5\xb7\xb2\xe7\xbb\x93\xe7\xae\x97%s",
+             (unsigned long)offlineInfo.appliedMin,
+             offlineInfo.capped ? "\xe3\x80\x80\xe5\xb7\xb2\xe5\xb0\x81\xe9\xa1\xb6" : "");
+  } else {
+    strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97: \xe6\x97\xa0\xe9\x9c\x80\xe6\x9b\xb4\xe6\x96\xb0", sizeof(bootOfflineNotice) - 1);
+  }
+
+  bootOfflineNotice[sizeof(bootOfflineNotice) - 1] = 0;
+}
 
 // Init SD hardware (pour SD saves OU futur chargement d'assets)
 static bool sdInit() {
@@ -2127,7 +2317,7 @@ static void storageInit() {
 #endif
 }
 
-static bool readJsonFile(const char* path, StaticJsonDocument<768>& doc, uint32_t& outSeq) {
+static bool readJsonFile(const char* path, StaticJsonDocument<1024>& doc, uint32_t& outSeq) {
   outSeq = 0;
   if (!saveReady) return false;
   if (!saveFS.exists(path)) return false;
@@ -2140,7 +2330,7 @@ static bool readJsonFile(const char* path, StaticJsonDocument<768>& doc, uint32_
   if (err) return false;
 
   int ver = doc["ver"] | 0;
-  if (ver != 1) return false;
+  if (ver < 1 || ver > 2) return false;
 
   outSeq = doc["seq"] | 0UL;
   if (!doc.containsKey("phase")) return false;
@@ -2193,14 +2383,14 @@ static void applyLoadedToRuntime(uint32_t now) {
 static bool loadLatestSave(uint32_t now) {
   if (!saveReady) return false;
 
-  StaticJsonDocument<768> dA, dB;
+  StaticJsonDocument<1024> dA, dB;
   uint32_t sA=0, sB=0;
   bool okA = readJsonFile(SAVE_A, dA, sA);
   bool okB = readJsonFile(SAVE_B, dB, sB);
 
   if (!okA && !okB) return false;
 
-  StaticJsonDocument<768>* bestDoc = nullptr;
+  StaticJsonDocument<1024>* bestDoc = nullptr;
   bool bestIsA = true;
 
   if (okA && (!okB || sA >= sB)) { bestDoc = &dA; bestIsA = true; }
@@ -2221,6 +2411,9 @@ static bool loadLatestSave(uint32_t now) {
   pet.ageMin = doc["ageMin"] | 0UL;
   pet.evolveProgressMin = doc["evolveProgressMin"] | 0UL;
   pet.vivant = doc["vivant"] | true;
+  savedTimeValid = doc["timeValid"] | false;
+  savedLastUnixTime = doc["lastUnixTime"] | 0UL;
+  savedWasSleeping = doc["lastSleeping"] | false;
 
   const char* nm = doc["name"] | "???";
   strncpy(petName, nm, sizeof(petName)-1);
@@ -2231,10 +2424,8 @@ static bool loadLatestSave(uint32_t now) {
   pet.soif    = (float)iClamp(ps["soif"]    | 60, 0, 100);
   pet.hygiene = (float)iClamp(ps["hygiene"] | 80, 0, 100);
   pet.humeur  = (float)iClamp(ps["humeur"]  | 60, 0, 100);
-  pet.energie = (float)iClamp(ps["energie"] | 100,0, 100);
   pet.fatigue = (float)iClamp(ps["fatigue"] | 100,0, 100);
   pet.amour   = (float)iClamp(ps["amour"]   | 60, 0, 100);
-  pet.caca    = (float)iClamp(ps["caca"]    | 0,  0, 100);
   pet.sante   = (float)iClamp(ps["sante"]   | 80, 0, 100);
 
 #if ENABLE_AUDIO
@@ -2258,9 +2449,9 @@ static bool loadLatestSave(uint32_t now) {
   return true;
 }
 
-static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char* why) {
-  StaticJsonDocument<768> doc;
-  doc["ver"] = 1;
+static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char* why, bool timeValid, uint32_t unixTime) {
+  StaticJsonDocument<1024> doc;
+  doc["ver"] = 2;
   doc["seq"] = saveSeq;
   doc["why"] = why;
 
@@ -2270,6 +2461,9 @@ static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char
   doc["evolveProgressMin"] = (uint32_t)pet.evolveProgressMin;
   doc["vivant"] = pet.vivant;
   doc["name"] = petName;
+  doc["timeValid"] = timeValid;
+  doc["lastUnixTime"] = timeValid ? unixTime : 0UL;
+  doc["lastSleeping"] = runtimeSleepingFlag();
 
 #if ENABLE_AUDIO
   doc["audioMode"] = (int)audioMode;
@@ -2281,10 +2475,8 @@ static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char
   ps["soif"]    = fToI100(pet.soif);
   ps["hygiene"] = fToI100(pet.hygiene);
   ps["humeur"]  = fToI100(pet.humeur);
-  ps["energie"] = fToI100(pet.energie);
   ps["fatigue"] = fToI100(pet.fatigue);
   ps["amour"]   = fToI100(pet.amour);
-  ps["caca"]    = fToI100(pet.caca);
   ps["sante"]   = fToI100(pet.sante);
 
   if (saveFS.exists(tmpPath)) saveFS.remove(tmpPath);
@@ -2305,6 +2497,13 @@ static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char
 
 static bool saveNow(uint32_t now, const char* why) {
   if (!saveReady) return false;
+  if (offlineSettlementInProgress) return false;
+
+  uint32_t unixTime = 0;
+  bool timeValid = readCurrentUnixTime(unixTime);
+  savedTimeValid = timeValid;
+  savedLastUnixTime = timeValid ? unixTime : 0UL;
+  savedWasSleeping = runtimeSleepingFlag();
 
   saveSeq++;
   const bool useA = nextSlotIsA;
@@ -2313,7 +2512,7 @@ static bool saveNow(uint32_t now, const char* why) {
   const char* tmp  = useA ? TMP_A  : TMP_B;
   const char* fin  = useA ? SAVE_A : SAVE_B;
 
-  bool ok = writeSlotFile(tmp, fin, why);
+  bool ok = writeSlotFile(tmp, fin, why, timeValid, unixTime);
   if (ok) {
     lastSaveAt = now;
   } else {
@@ -2337,14 +2536,15 @@ static void rebuildUISprites(uint32_t now) {
   char line[96];
   bool showStatusLine = false;
   uint16_t statusColor = criticalBlinkOn(now) ? TFT_RED : TFT_WHITE;
+#if 0
 if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
 
   // ⚠️ Astuce: si ton écran/typo gère mal "œ" et "…",
   // garde la version ASCII ci-dessous (oeuf / ...)
-  const char* l1 = "\xe4\xb8\x80\xe9\xa2\x97\xe6\x81\x90\xe9\xbe\x99\xe8\x9b\x8b...";               // 一颗恐龙蛋...
-  const char* l2 = "\xe7\x8e\xb0\xe5\x9c\xa8\xe5\xae\x83\xe8\xbf\x98\xe5\xbe\x88\xe5\xb0\x8f\xe3\x80\x82"; // 现在它还很小。
-  const char* l3 = "\xe4\xbd\x86\xe8\xbf\x99\xe6\x98\xaf\xe4\xb8\x80\xe4\xb8\xaa\xe7\x94\x9f\xe5\x91\xbd\xe3\x80\x82"; // 但这是一个生命。
-  const char* l4 = "\xe5\xa5\xbd\xe5\xa5\xbd\xe7\x85\xa7\xe9\xa1\xbe\xe5\xae\x83\xe5\x90\xa7\xe3\x80\x82"; // 好好照顾它吧。
+  const char* l1 = "\xe4\xb8\x80\xe9\xa2\x97\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe5\x8d\xb5...";               // 一颗龙泡泡卵...
+  const char* l2 = "\xe5\xae\x83\xe8\xbf\x98\xe5\x8f\xaa\xe6\x98\xaf\xe5\xb9\xbc\xe4\xbd\x93\xe3\x80\x82"; // 它还只是幼体。
+  const char* l3 = "\xe5\x8d\x9a\xe5\xa3\xab\xef\xbc\x8c\xe4\xbd\xa0\xe5\xb7\xb2\xe6\x8e\xa5\xe6\x89\x8b"; // 博士，你已接手
+  const char* l4 = "\xe8\xbf\x99\xe4\xbb\xbd\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe7\x85\xa7\xe6\x8a\xa4\xe3\x80\x82"; // 这份罗德岛照护。
 
   // Positionnement
   int x = 10;
@@ -2373,12 +2573,12 @@ if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
   showStatusLine = false;  // IMPORTANT: sinon il ré-affiche "line" en haut
 }
  else if (phase == PHASE_RESTREADY) {
-    const char* l1 = "\xe6\x81\xad\xe5\x96\x9c!";               // 恭喜!
-    const char* l2 = "\xe5\xa4\x9a\xe4\xba\x8f\xe4\xbd\xa0\xe7\x9a\x84\xe7\x85\xa7\xe9\xa1\xbe,"; // 多亏你的照顾,
-    const char* l3 = "\xe4\xbd\xa0\xe7\x9a\x84\xe6\x81\x90\xe9\xbe\x99";     // 你的恐龙
-    const char* l4 = "\xe5\xba\xa6\xe8\xbf\x87\xe4\xba\x86\xe7\xbe\x8e\xe5\xa5\xbd\xe7\x9a\x84\xe4\xb8\x80\xe7\x94\x9f\xe3\x80\x82"; // 度过了美好的一生。
-    const char* l5 = "\xe5\xae\x83\xe5\xb7\xb2\xe5\xae\x89\xe6\x81\xaf\xe5\x9c\xa8";   // 它已安息在
-    const char* l6 = "\xe6\x81\x90\xe9\xbe\x99\xe5\xa4\xa9\xe5\xa0\x82\xe3\x80\x82";   // 恐龙天堂。
+    const char* l1 = "\xe8\xae\xb0\xe5\xbd\x95\xe5\xae\x8c\xe6\x88\x90!";               // 记录完成!
+    const char* l2 = "\xe5\xa4\x9a\xe4\xba\x8f\xe5\x8d\x9a\xe5\xa3\xab\xe7\x9a\x84\xe7\x85\xa7\xe6\x8a\xa4,"; // 多亏博士的照护,
+    const char* l3 = "\xe8\xbf\x99\xe5\x8f\xaa\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1";     // 这只龙泡泡
+    const char* l4 = "\xe5\xb9\xb3\xe7\xa8\xb3\xe5\xba\xa6\xe8\xbf\x87\xe4\xba\x86\xe6\x88\x90\xe9\x95\xbf\xe9\x98\xb6\xe6\xae\xb5\xe3\x80\x82"; // 平稳度过了成长阶段。
+    const char* l5 = "\xe6\x96\xb0\xe7\x9a\x84\xe6\x94\xb6\xe5\xae\xb9\xe4\xbb\xbb\xe5\x8a\xa1";   // 新的收容任务
+    const char* l6 = "\xe5\xb7\xb2\xe7\xbb\x8f\xe5\x9c\xa8\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe5\xbe\x85\xe5\x91\xbd\xe3\x80\x82";   // 已经在罗德岛待命。
 
     setCNFont(uiTop);
     uiTop.setTextColor(TFT_BLACK, KEY);
@@ -2400,10 +2600,10 @@ if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
   } else if (phase == PHASE_TOMB || phase == PHASE_RESTREADY) {
 
   // 4 lignes (évite les accents si ton font les gère mal)
-  const char* l1 = "\xe4\xbd\xa0\xe5\xbf\xbd\xe8\xa7\x86\xe4\xba\x86\xe5\xae\x83\xe3\x80\x82";       // 你忽视了它。
-  const char* l2 = "\xe4\xbd\xa0\xe6\x9c\xac\xe5\xba\x94\xe8\xb4\x9f\xe8\xb4\xa3";               // 你本应负责
-  const char* l3 = "\xe7\x85\xa7\xe9\xa1\xbe\xe5\xae\x83\xe7\x9a\x84...";                         // 照顾它的...
-  const char* l4 = "\xe4\xbd\x86\xe4\xbd\xa0\xe5\xa4\xb1\xe5\x8e\xbb\xe4\xba\x86\xe5\xae\x83\xe3\x80\x82"; // 但你失去了它。
+  const char* l1 = "\xe5\x8d\x9a\xe5\xa3\xab\xe7\x96\x8f\xe4\xba\x8e\xe5\x80\xbc\xe5\xae\x88\xe3\x80\x82";       // 博士疏于值守。
+  const char* l2 = "\xe8\xbf\x99\xe5\x8f\xaa\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1";               // 这只龙泡泡
+  const char* l3 = "\xe6\x9c\xac\xe5\xba\x94\xe5\x9c\xa8\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b";                         // 本应在罗德岛
+  const char* l4 = "\xe7\xbb\xa7\xe7\xbb\xad\xe9\x95\xbf\xe5\xa4\xa7\xe3\x80\x82"; // 继续长大。
 
   // 使用中文字体
   setCNFont(uiTop);
@@ -2425,8 +2625,81 @@ if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
   // IMPORTANT: on sort ici sinon le code plus bas ré-affiche autre chose
 
   } else {
-    snprintf(line, sizeof(line), "\xe5\x81\xa5\xe5\xba\xb7:%d  \xe5\xb9\xb4\xe9\xbe\x84:%lum  %s",
-             (int)roundf(pet.sante),
+    snprintf(line, sizeof(line), "\xe6\xa1\xa3\xe6\xa1\x88\xe9\xbe\x84:%lum  %s",
+             (unsigned long)pet.ageMin,
+             stageLabel(pet.stage));
+    showStatusLine = true;
+  }
+#endif
+
+  if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
+    const char* l1 = "\xe4\xb8\x80\xe9\xa2\x97\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe5\x8d\xb5...";
+    const char* l2 = "\xe5\xae\x83\xe8\xbf\x98\xe5\x8f\xaa\xe6\x98\xaf\xe5\xb9\xbc\xe4\xbd\x93\xe3\x80\x82";
+    const char* l3 = "\xe5\x8d\x9a\xe5\xa3\xab\xef\xbc\x8c\xe4\xbd\xa0\xe5\xb7\xb2\xe6\x8e\xa5\xe6\x89\x8b";
+    const char* l4 = "\xe8\xbf\x99\xe4\xbb\xbd\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe7\x85\xa7\xe6\x8a\xa4\xe3\x80\x82";
+    const int x = 10;
+    const int y = 6;
+    const int y2 = y + 18;
+
+    setCNFont(uiTop);
+    uiTop.setTextColor(TFT_BLACK, KEY);
+    uiTop.setCursor(x + 1, y + 1);   uiTop.print(l1);
+    uiTop.setCursor(x + 1, y2 + 1);  uiTop.print(l2);
+    uiTop.setCursor(x + 1, y2 + 17); uiTop.print(l3);
+    uiTop.setCursor(x + 1, y2 + 33); uiTop.print(l4);
+
+    uiTop.setTextColor(TFT_WHITE, KEY);
+    uiTop.setCursor(x, y);       uiTop.print(l1);
+    uiTop.setCursor(x, y2);      uiTop.print(l2);
+    uiTop.setCursor(x, y2 + 16); uiTop.print(l3);
+    uiTop.setCursor(x, y2 + 32); uiTop.print(l4);
+    resetFont(uiTop);
+  } else if (phase == PHASE_RESTREADY) {
+    const char* l1 = "\xe8\xae\xb0\xe5\xbd\x95\xe5\xae\x8c\xe6\x88\x90!";
+    const char* l2 = "\xe5\xa4\x9a\xe4\xba\x8f\xe5\x8d\x9a\xe5\xa3\xab\xe7\x9a\x84\xe7\x85\xa7\xe6\x8a\xa4,";
+    const char* l3 = "\xe8\xbf\x99\xe5\x8f\xaa\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1";
+    const char* l4 = "\xe5\xb9\xb3\xe7\xa8\xb3\xe5\xba\xa6\xe8\xbf\x87\xe4\xba\x86\xe6\x88\x90\xe9\x95\xbf\xe9\x98\xb6\xe6\xae\xb5\xe3\x80\x82";
+    const char* l5 = "\xe6\x96\xb0\xe7\x9a\x84\xe6\x94\xb6\xe5\xae\xb9\xe4\xbb\xbb\xe5\x8a\xa1";
+    const char* l6 = "\xe5\xb7\xb2\xe7\xbb\x8f\xe5\x9c\xa8\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe5\xbe\x85\xe5\x91\xbd\xe3\x80\x82";
+
+    setCNFont(uiTop);
+    uiTop.setTextColor(TFT_BLACK, KEY);
+    uiTop.setCursor(11,  9); uiTop.print(l1);
+    uiTop.setCursor(11, 23); uiTop.print(l2);
+    uiTop.setCursor(11, 37); uiTop.print(l3);
+    uiTop.setCursor(11, 51); uiTop.print(l4);
+    uiTop.setCursor(11, 65); uiTop.print(l5);
+    uiTop.setCursor(11, 79); uiTop.print(l6);
+
+    uiTop.setTextColor(statusColor, KEY);
+    uiTop.setCursor(10,  8); uiTop.print(l1);
+    uiTop.setCursor(10, 22); uiTop.print(l2);
+    uiTop.setCursor(10, 36); uiTop.print(l3);
+    uiTop.setCursor(10, 50); uiTop.print(l4);
+    uiTop.setCursor(10, 64); uiTop.print(l5);
+    uiTop.setCursor(10, 78); uiTop.print(l6);
+    resetFont(uiTop);
+  } else if (phase == PHASE_TOMB) {
+    const char* l1 = "\xe5\x8d\x9a\xe5\xa3\xab\xe7\x96\x8f\xe4\xba\x8e\xe5\x80\xbc\xe5\xae\x88\xe3\x80\x82";
+    const char* l2 = "\xe8\xbf\x99\xe5\x8f\xaa\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1";
+    const char* l3 = "\xe6\x9c\xac\xe5\xba\x94\xe5\x9c\xa8\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b";
+    const char* l4 = "\xe7\xbb\xa7\xe7\xbb\xad\xe9\x95\xbf\xe5\xa4\xa7\xe3\x80\x82";
+
+    setCNFont(uiTop);
+    uiTop.setTextColor(TFT_BLACK, KEY);
+    uiTop.setCursor(7,  6); uiTop.print(l1);
+    uiTop.setCursor(7, 22); uiTop.print(l2);
+    uiTop.setCursor(7, 38); uiTop.print(l3);
+    uiTop.setCursor(7, 54); uiTop.print(l4);
+
+    uiTop.setTextColor(TFT_WHITE, KEY);
+    uiTop.setCursor(6,  5); uiTop.print(l1);
+    uiTop.setCursor(6, 21); uiTop.print(l2);
+    uiTop.setCursor(6, 37); uiTop.print(l3);
+    uiTop.setCursor(6, 53); uiTop.print(l4);
+    resetFont(uiTop);
+  } else {
+    snprintf(line, sizeof(line), "\xe6\xa1\xa3\xe6\xa1\x88\xe9\xbe\x84:%lum  %s",
              (unsigned long)pet.ageMin,
              stageLabel(pet.stage));
     showStatusLine = true;
@@ -2470,9 +2743,9 @@ if (phase == PHASE_ALIVE) {
     }
   }
 
-    if (phase == PHASE_ALIVE) {
+  if (phase == PHASE_ALIVE) {
     int pad = 6;
-    int cols = 4;
+    int cols = 3;
     int w = (SW - pad*(cols+1)) / cols;
     int h = 12;
 
@@ -2480,16 +2753,14 @@ if (phase == PHASE_ALIVE) {
     int y2 = 50;
 
     int x = pad;
-    drawBarRound(uiTop, x, y1, w, h, pet.faim,    "\xe9\xa5\xa5\xe9\xa5\xbf",    COL_FAIM);    x += w + pad;    // 饥饿
-    drawBarRound(uiTop, x, y1, w, h, pet.soif,    "\xe5\x8f\xa3\xe6\xb8\xb4",    COL_SOIF);    x += w + pad;    // 口渴
-    drawBarRound(uiTop, x, y1, w, h, pet.hygiene, "\xe5\x8d\xab\xe7\x94\x9f", COL_HYGIENE); x += w + pad;      // 卫生
-    drawBarRound(uiTop, x, y1, w, h, pet.humeur,  "\xe5\xbf\xab\xe4\xb9\x90",  COL_HUMEUR);                     // 快乐
+    drawBarRound(uiTop, x, y1, w, h, pet.faim,    "\xe9\xa5\xb1\xe8\x85\xb9", COL_FAIM);    x += w + pad;   // 饱腹
+    drawBarRound(uiTop, x, y1, w, h, pet.soif,    "\xe6\xb0\xb4\xe5\x88\x86", COL_SOIF);    x += w + pad;   // 水分
+    drawBarRound(uiTop, x, y1, w, h, (100.0f - pet.fatigue), "\xe7\x96\xb2\xe5\x8a\xb3", COL_FATIGUE);      // 疲劳
 
     x = pad;
-    drawBarRound(uiTop, x, y2, w, h, pet.energie, "\xe7\xb2\xbe\xe5\x8a\x9b", COL_ENERGIE); x += w + pad;      // 精力
-    drawBarRound(uiTop, x, y2, w, h, (100.0f - pet.fatigue), "\xe7\x96\xb2\xe5\x8a\xb3", COL_FATIGUE); x += w + pad; // 疲劳
-    drawBarRound(uiTop, x, y2, w, h, pet.amour,   "\xe7\x88\xb1\xe5\xbf\x83",   COL_AMOUR2);  x += w + pad;    // 爱心
-    drawBarRound(uiTop, x, y2, w, h, pet.caca,    "\xe4\xbe\xbf\xe4\xbe\xbf",    COL_CACA);                     // 便便
+    drawBarRound(uiTop, x, y2, w, h, pet.hygiene, "\xe5\x8d\xab\xe7\x94\x9f", COL_HYGIENE); x += w + pad;   // 卫生
+    drawBarRound(uiTop, x, y2, w, h, pet.humeur,  "\xe5\xbf\x83\xe6\x83\x85", COL_HUMEUR);  x += w + pad;   // 心情
+    drawBarRound(uiTop, x, y2, w, h, pet.amour,   "\xe4\xba\xb2\xe5\xaf\x86", COL_AMOUR2);                    // 亲密
   }
 
   // Zone sous les barres (à la place de l'activity bar quand on est libre)
@@ -2537,8 +2808,8 @@ const int TOP_BTN_PAD = 8;
     int xL = TOP_BTN_PAD;
     int xR = SW - TOP_BTN_PAD - TOP_BTN_W;
 
-    drawTopBtn(xL, "\xe5\x90\x83", btnColorForAction(UI_MANGER), cdEat);       // 吃
-    drawTopBtn(xR, "\xe5\x96\x9d",  btnColorForAction(UI_BOIRE),  cdDrink);   // 喝
+    drawTopBtn(xL, "\xe5\x96\x82\xe9\xa3\x9f", btnColorForAction(UI_MANGER), cdEat);   // 喂食
+    drawTopBtn(xR, "\xe5\x96\x9d\xe6\xb0\xb4", btnColorForAction(UI_BOIRE),  cdDrink); // 喝水
 #endif
   }
 
@@ -2889,54 +3160,42 @@ static void applyTaskEffects(TaskKind k, uint32_t now) {
   switch (k) {
     case TASK_EAT:
       add(pet.faim,    EAT_HUNGER);
-      add(pet.energie, EAT_ENERGY);
       add(pet.fatigue, EAT_FATIGUE);
       add(pet.soif,    EAT_THIRST);
-      add(pet.caca,    EAT_POOP);
+      add(pet.humeur,  EAT_MOOD);
       break;
 
     case TASK_DRINK:
       add(pet.soif,    DRINK_THIRST);
-      add(pet.energie, DRINK_ENERGY);
       add(pet.fatigue, DRINK_FATIGUE);
-      add(pet.caca,    DRINK_POOP);
+      add(pet.humeur,  DRINK_MOOD);
       break;
 
     case TASK_WASH:
       add(pet.hygiene, WASH_HYGIENE);
       add(pet.humeur,  WASH_MOOD);
-      add(pet.energie, WASH_ENERGY);
       add(pet.fatigue, WASH_FATIGUE);
       break;
 
     case TASK_PLAY:
       add(pet.humeur,  PLAY_MOOD);
-      add(pet.energie, PLAY_ENERGY);
       add(pet.fatigue, PLAY_FATIGUE);
       add(pet.faim,    PLAY_HUNGER);
       add(pet.soif,    PLAY_THIRST);
+      add(pet.amour,   PLAY_LOVE);
       break;
 
     case TASK_POOP:
-      pet.caca = clamp01f(POOP_SET);
-      add(pet.hygiene, POOP_HYGIENE);
-      add(pet.humeur,  POOP_MOOD);
-      add(pet.energie, POOP_ENERGY);
-      add(pet.fatigue, POOP_FATIGUE);
-
-      poopVisible = true;
-      poopUntil = now + 8000;
-      {
-        float off = movingRight ? -12.0f : +12.0f;
-        poopWorldX = worldX + off;
-      }
+      add(pet.hygiene, CLEAN_HYGIENE);
+      add(pet.humeur,  CLEAN_MOOD);
+      add(pet.amour,   CLEAN_LOVE);
+      add(pet.fatigue, CLEAN_FATIGUE);
       break;
 
     case TASK_HUG:
       add(pet.amour,   HUG_LOVE);
       add(pet.humeur,  HUG_MOOD);
       add(pet.fatigue, HUG_FATIGUE);
-      add(pet.energie, HUG_ENERGY);
       break;
 
     default: break;
@@ -2951,7 +3210,7 @@ static void applyTaskEffects(TaskKind k, uint32_t now) {
 
 // ================== Start task ==================
 static bool startTask(TaskKind k, uint32_t now) {
-  if (!pet.vivant) { setMsg("\xe5\xae\x83\xe5\xb7\xb2\xe7\xbb\x8f\xe6\xad\xbb\xe4\xba\x86...", now, 2000); return false; }
+  if (!pet.vivant) { setMsg("\xe8\xbf\x99\xe5\x8f\xaa\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe5\xb7\xb2\xe7\xa6\xbb\xe5\xbc\x80\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b...", now, 2200); return false; }
   if (phase != PHASE_ALIVE && phase != PHASE_RESTREADY) return false;
   if (state == ST_SLEEP && k != TASK_SLEEP) return false;
 
@@ -2973,7 +3232,7 @@ static bool startTask(TaskKind k, uint32_t now) {
     task.doMs = scaleByFatigueAndAge(BASE_EAT_MS);
     task.plannedTotal = task.doMs;
 
-    activityShowFull(now, "\xe5\x89\x8d\xe5\xbe\x80\xe5\x90\x83\xe4\xb8\x9c\xe8\xa5\xbf...");  // 前往吃东西...
+    activityShowFull(now, "\xe5\x89\x8d\xe5\xbe\x80\xe8\xa1\xa5\xe7\xbb\x99\xe7\x82\xb9...");  // 前往补给点...
     enterState(ST_WALK, now);
   }
   else if (k == TASK_DRINK) {
@@ -2983,7 +3242,7 @@ static bool startTask(TaskKind k, uint32_t now) {
     task.doMs = scaleByFatigueAndAge(BASE_DRINK_MS);
     task.plannedTotal = task.doMs;
 
-    activityShowFull(now, "\xe5\x89\x8d\xe5\xbe\x80\xe5\x96\x9d\xe6\xb0\xb4...");  // 前往喝水...
+    activityShowFull(now, "\xe5\x89\x8d\xe5\xbe\x80\xe9\xa5\xae\xe6\xb0\xb4\xe7\xab\x99...");  // 前往饮水站...
     enterState(ST_WALK, now);
   }
   else if (k == TASK_SLEEP) {
@@ -3010,9 +3269,9 @@ static bool startTask(TaskKind k, uint32_t now) {
     task.doUntil = now + tDo;
 
     if (k == TASK_POOP) {
-      activityStartTask(now, "\xe4\xbe\xbf\xe4\xbe\xbf\xe4\xb8\xad...", task.plannedTotal);   // 便便中...
+      activityStartTask(now, "\xe5\x90\x8e\xe5\x8b\xa4\xe6\xb8\x85\xe7\x90\x86\xe4\xb8\xad...", task.plannedTotal);   // 后勤清理中...
     } else if (k == TASK_HUG) {
-      activityStartTask(now, "\xe6\x8a\xb1\xe6\x8a\xb1\xe4\xb8\xad...", task.plannedTotal);  // 抱抱中...
+      activityStartTask(now, "\xe5\x8d\x9a\xe5\xa3\xab\xe9\x99\xaa\xe4\xbc\xb4\xe4\xb8\xad...", task.plannedTotal);  // 博士陪伴中...
     }
 
     enterState(ST_SIT, now);
@@ -3035,7 +3294,6 @@ static void updateTask(uint32_t now) {
     if (dt >= 100) {
       float sec = (float)dt / 1000.0f;
       pet.fatigue = clamp01f(pet.fatigue + SLEEP_GAIN_PER_SEC * sec);
-      pet.energie = clamp01f(pet.energie + SLEEP_GAIN_PER_SEC * sec);
       lastSleepGainAt = now;
       uiSpriteDirty = true; uiForceBands = true;
     }
@@ -3055,24 +3313,24 @@ static void updateTask(uint32_t now) {
 
         if (task.kind == TASK_EAT) {
           if (!berriesLeftAvailable) {
-            activityShowFull(now, "\xe6\xb2\xa1\xe6\x9c\x89\xe6\xb5\x86\xe6\x9e\x9c\xe4\xba\x86...");  // 没有浆果了...
+            activityShowFull(now, "\xe8\xa1\xa5\xe7\xbb\x99\xe7\x82\xb9\xe7\xa9\xba\xe4\xba\x86...");  // 补给点空了...
             task.ph = PH_RETURN;
             enterState(ST_WALK, now);
             return;
           }
-          activityShowProgress(now, "\xe5\x90\x83\xe4\xb8\x9c\xe8\xa5\xbf...", task.doMs);  // 吃东西...
+          activityShowProgress(now, "\xe9\xa2\x86\xe5\x8f\x96\xe9\xa4\x90\xe5\x8c\x85...", task.doMs);  // 领取餐包...
           enterState(ST_EAT, now);
           task.doUntil = now + task.doMs;
           return;
         }
         else if (task.kind == TASK_DRINK) {
           if (!puddleVisible) {
-            activityShowFull(now, "\xe6\xb2\xa1\xe6\x9c\x89\xe6\xb0\xb4\xe4\xba\x86...");  // 没有水了...
+            activityShowFull(now, "\xe9\xa5\xae\xe6\xb0\xb4\xe7\xab\x99\xe7\xa9\xba\xe4\xba\x86...");  // 饮水站空了...
             task.ph = PH_RETURN;
             enterState(ST_WALK, now);
             return;
           }
-          activityShowProgress(now, "\xe5\x96\x9d\xe6\xb0\xb4...", task.doMs);  // 喝水...
+          activityShowProgress(now, "\xe8\xa1\xa5\xe6\xb0\xb4\xe4\xb8\xad...", task.doMs);  // 补水中...
           enterState(ST_EAT, now);
           task.doUntil = now + task.doMs;
           return;
@@ -3095,11 +3353,11 @@ static void updateTask(uint32_t now) {
     }
 
     if (task.ph == PH_GO) {
-      if (task.kind == TASK_EAT) activitySetText("\xe5\x89\x8d\xe5\xbe\x80\xe5\x90\x83\xe4\xb8\x9c\xe8\xa5\xbf...");       // 前往吃东西...
-      else if (task.kind == TASK_DRINK) activitySetText("\xe5\x89\x8d\xe5\xbe\x80\xe5\x96\x9d\xe6\xb0\xb4...");           // 前往喝水...
+      if (task.kind == TASK_EAT) activitySetText("\xe5\x89\x8d\xe5\xbe\x80\xe8\xa1\xa5\xe7\xbb\x99\xe7\x82\xb9...");       // 前往补给点...
+      else if (task.kind == TASK_DRINK) activitySetText("\xe5\x89\x8d\xe5\xbe\x80\xe9\xa5\xae\xe6\xb0\xb4\xe7\xab\x99...");           // 前往饮水站...
     } else if (task.ph == PH_RETURN) {
-      if (task.kind == TASK_EAT) activitySetText("\xe5\x90\x83\xe5\xae\x8c\xe5\x9b\x9e\xe6\x9d\xa5...");                 // 吃完回来...
-      else if (task.kind == TASK_DRINK) activitySetText("\xe5\x96\x9d\xe5\xae\x8c\xe5\x9b\x9e\xe6\x9d\xa5...");           // 喝完回来...
+      if (task.kind == TASK_EAT) activitySetText("\xe8\xa1\xa5\xe7\xbb\x99\xe5\xae\x8c\xe6\x88\x90\xef\xbc\x8c\xe8\xbf\x94\xe5\x9b\x9e...");                 // 补给完成，返回...
+      else if (task.kind == TASK_DRINK) activitySetText("\xe8\xa1\xa5\xe6\xb0\xb4\xe5\xae\x8c\xe6\x88\x90\xef\xbc\x8c\xe8\xbf\x94\xe5\x9b\x9e...");           // 补水完成，返回...
     }
 
     return;
@@ -3122,8 +3380,6 @@ static void updateTask(uint32_t now) {
         playRTTTLOnce(RTTTL_EAT_INTRO, AUDIO_PRIO_MED);
       } else if (task.kind == TASK_DRINK) {
         playRTTTLOnce(RTTTL_DRINK_INTRO, AUDIO_PRIO_MED);
-      } else if (task.kind == TASK_POOP) {
-        playRTTTLOnce(RTTTL_POOP_INTRO, AUDIO_PRIO_HIGH);
       } else if (task.kind == TASK_HUG) {
         playRTTTLOnce(RTTTL_HUG_INTRO, AUDIO_PRIO_MED);
       }
@@ -3132,8 +3388,8 @@ static void updateTask(uint32_t now) {
 
       task.ph = PH_RETURN;
 
-      if (task.kind == TASK_EAT) activityShowFull(now, "\xe5\x90\x83\xe5\xae\x8c\xe5\x9b\x9e\xe6\x9d\xa5...");       // 吃完回来...
-      else if (task.kind == TASK_DRINK) activityShowFull(now, "\xe5\x96\x9d\xe5\xae\x8c\xe5\x9b\x9e\xe6\x9d\xa5..."); // 喝完回来...
+      if (task.kind == TASK_EAT) activityShowFull(now, "\xe8\xa1\xa5\xe7\xbb\x99\xe5\xae\x8c\xe6\x88\x90\xef\xbc\x8c\xe8\xbf\x94\xe5\x9b\x9e...");       // 补给完成，返回...
+      else if (task.kind == TASK_DRINK) activityShowFull(now, "\xe8\xa1\xa5\xe6\xb0\xb4\xe5\xae\x8c\xe6\x88\x90\xef\xbc\x8c\xe8\xbf\x94\xe5\x9b\x9e..."); // 补水完成，返回...
 
       enterState(ST_WALK, now);
     }
@@ -3145,7 +3401,9 @@ static void updateTask(uint32_t now) {
 static inline bool goodEvolve80() {
   return (pet.faim   >= EVOLVE_THR &&
           pet.soif   >= EVOLVE_THR &&
+          pet.hygiene>= EVOLVE_THR &&
           pet.humeur >= EVOLVE_THR &&
+          pet.fatigue>= EVOLVE_THR &&
           pet.amour  >= EVOLVE_THR);
 }
 static void evolutionTick(uint32_t now) {
@@ -3165,11 +3423,11 @@ static void evolutionTick(uint32_t now) {
 
     if (pet.stage == AGE_JUNIOR) {
       pet.stage = AGE_ADULTE;
-      setMsg("\xe8\xbf\x9b\xe5\x8c\x96: \xe6\x88\x90\xe5\xb9\xb4!", now, 2000);  // 进化: 成年!
+      setMsg("\xe6\x88\x90\xe9\x95\xbf\xe8\xae\xb0\xe5\xbd\x95\xe6\x9b\xb4\xe6\x96\xb0: \xe6\x88\x90\xe4\xbd\x93!", now, 2200);  // 成长记录更新: 成体!
       saveNow(now, "evolve");
     } else if (pet.stage == AGE_ADULTE) {
       pet.stage = AGE_SENIOR;
-      setMsg("\xe8\xbf\x9b\xe5\x8c\x96: \xe8\x80\x81\xe5\xb9\xb4!", now, 2000);  // 进化: 老年!
+      setMsg("\xe6\x88\x90\xe9\x95\xbf\xe8\xae\xb0\xe5\xbd\x95\xe6\x9b\xb4\xe6\x96\xb0: \xe7\xa8\xb3\xe5\xae\x9a\xe4\xbd\x93!", now, 2200);  // 成长记录更新: 稳定体!
       saveNow(now, "evolve");
     } else {
       phase = PHASE_RESTREADY;
@@ -3177,27 +3435,6 @@ static void evolutionTick(uint32_t now) {
       uiForceBands = true;
       saveNow(now, "restready");
     }
-  }
-}
-
-// ================== Santé / malus caca ==================
-static void poopAccidentCheck(uint32_t now) {
-  if (pet.caca >= (float)POOP_ACCIDENT_AT) {
-    if (!pet.poopAccidentLatched) {
-      pet.poopAccidentLatched = true;
-      pet.hygiene = 0;
-      pet.humeur  = 5;
-      pet.sante   = clamp01f(pet.sante - 10);
-      pet.caca    = 60;
-      setMsg("\xe6\x84\x8f\xe5\xa4\x96... \xe5\xa5\xbd\xe8\x84\x8f!", now, 2200);  // 意外... 好脏!
-    }
-  } else {
-    pet.poopAccidentLatched = false;
-  }
-
-  if (pet.caca >= POOP_STRESS_THR) {
-    pet.hygiene = clamp01f(pet.hygiene - 0.5f);
-    pet.humeur  = clamp01f(pet.humeur  - 0.5f);
   }
 }
 
@@ -3210,12 +3447,8 @@ static void updateHealthTick(uint32_t now) {
   if (pet.soif    < 15) ds -= 2;
   if (pet.hygiene < 15) ds -= 1;
   if (pet.humeur  < 10) ds -= 1;
-  if (pet.energie < 10) ds -= 1;
   if (pet.fatigue < 10) ds -= 1;
   if (pet.amour   < 10) ds -= 0.5f;
-  if (pet.caca >= 95) ds -= 1;
-
-  ds *= HEALTH_TICK_MULT;
 
   if (ds < 0) pet.sante = clamp01f(pet.sante + ds);
 
@@ -3230,7 +3463,7 @@ static void handleDeath(uint32_t now) {
   task.kind = TASK_NONE;
   appMode = MODE_PET;
   enterState(ST_DEAD, now);
-  activityShowFull(now, "\xe4\xbd\xa0\xe6\xb2\xa1\xe6\x9c\x89\xe7\x85\xa7\xe9\xa1\xbe\xe5\xa5\xbd\xe5\xae\x83\xef\xbc\x8c\xe5\xae\x83\xe5\xa4\xb1\xe5\x8e\xbb\xe4\xba\x86\xe7\x94\x9f\xe5\x91\xbd\xe3\x80\x82");  // 你没有照顾好它，它失去了生命。
+  activityShowFull(now, "\xe5\x8d\x9a\xe5\xa3\xab\xe6\x9c\xaa\xe8\x83\xbd\xe5\xae\x8c\xe6\x88\x90\xe7\x85\xa7\xe6\x8a\xa4\xef\xbc\x8c\xe5\xae\x83\xe7\xa6\xbb\xe5\xbc\x80\xe4\xba\x86\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe3\x80\x82");  // 博士未能完成照护，它离开了罗德岛。
   uiSel = 0;
   uiSpriteDirty = true;
   uiForceBands = true;
@@ -3265,19 +3498,15 @@ static void updatePetTick(uint32_t now) {
     add(pet.humeur,  +0.2f);
     add(pet.amour,   -0.2f);
     add(pet.sante,   + 0.1f);
-    add(pet.caca,    SLEEP_POOP_D);
   } else {
     add(pet.faim,    AWAKE_HUNGER_D);
     add(pet.soif,    AWAKE_THIRST_D);
     add(pet.hygiene, AWAKE_HYGIENE_D);
     add(pet.humeur,  AWAKE_MOOD_D);
-    add(pet.energie, AWAKE_ENERGY_D);
     add(pet.fatigue, AWAKE_FATIGUE_D);
     add(pet.amour,   AWAKE_LOVE_D);
-    add(pet.caca,    AWAKE_POOP_D);
   }
 
-  poopAccidentCheck(now);
   updateHealthTick(now);
 
   pet.ageMin++;
@@ -3285,6 +3514,75 @@ static void updatePetTick(uint32_t now) {
 
   uiSpriteDirty = true;
   uiForceBands  = true;
+}
+
+static void processOfflineSettlement(uint32_t now) {
+  offlineInfo = OfflineSettlementInfo{};
+  offlineInfo.checked = true;
+
+  uint32_t currentUnixTime = 0;
+  if (!readCurrentUnixTime(currentUnixTime)) {
+    offlineInfo.skippedNoClock = true;
+    buildOfflineNotice();
+    return;
+  }
+
+  if (!savedTimeValid || savedLastUnixTime == 0) {
+    offlineInfo.skippedNoSavedTime = true;
+    buildOfflineNotice();
+    if (saveReady) saveNow(now, "boot_time_seed");
+    return;
+  }
+
+  if (currentUnixTime <= savedLastUnixTime) {
+    offlineInfo.skippedInvalidDelta = true;
+    buildOfflineNotice();
+    if (saveReady) saveNow(now, "boot_time_reset");
+    return;
+  }
+
+  offlineInfo.elapsedSec = currentUnixTime - savedLastUnixTime;
+  uint32_t elapsedMin = offlineInfo.elapsedSec / 60UL;
+  if (elapsedMin == 0) {
+    buildOfflineNotice();
+    return;
+  }
+
+  offlineInfo.appliedMin = min(elapsedMin, OFFLINE_SETTLE_CAP_MIN);
+  offlineInfo.capped = (offlineInfo.appliedMin < elapsedMin);
+
+  task.active = false;
+  task.kind = TASK_NONE;
+  task.ph = PH_GO;
+  appMode = MODE_PET;
+  mg.active = false;
+  mg.kind = TASK_NONE;
+  activityVisible = false;
+  activityText[0] = 0;
+  showMsg = false;
+  msgText[0] = 0;
+
+  TriState restoreState = savedWasSleeping ? ST_SLEEP : ST_SIT;
+  enterState(restoreState, now);
+
+  offlineSettlementInProgress = true;
+  for (uint32_t i = 0; i < offlineInfo.appliedMin; ++i) {
+    updatePetTick(now);
+    if (!pet.vivant || phase == PHASE_TOMB) {
+      offlineInfo.petDied = true;
+      break;
+    }
+  }
+  offlineSettlementInProgress = false;
+
+  if (pet.vivant) {
+    if (phase == PHASE_ALIVE || phase == PHASE_RESTREADY) enterState(restoreState, now);
+  }
+
+  offlineInfo.applied = true;
+  buildOfflineNotice();
+
+  if (saveReady) saveNow(now, "boot_offline");
 }
 
 // ================== Idle autonome (80% marche / 10% assis / 10% cligne) ==================
@@ -3438,7 +3736,7 @@ static void uiPressAction(uint32_t now) {
     activityVisible = true;
     activityStart = now;
     activityEnd   = now + 1200;
-    strcpy(activityText, "\xe5\xad\xb5\xe5\x8c\x96\xe4\xb8\xad...");  // 孵化中...
+    strcpy(activityText, "\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe5\xad\xb5\xe5\x8c\x96\xe4\xb8\xad...");  // 罗德岛孵化中...
     uiSpriteDirty = true; uiForceBands = true;
     return;
   }
@@ -3452,7 +3750,7 @@ static void uiPressAction(uint32_t now) {
 
   if (phase == PHASE_RESTREADY) {
     resetToEgg(now);
-    setMsg("\xe4\xb8\x80\xe9\xa2\x97\xe6\x96\xb0\xe8\x9b\x8b...", now, 1500);  // 一颗新蛋...
+    setMsg("\xe6\x96\xb0\xe7\x9a\x84\xe6\x94\xb6\xe5\xae\xb9\xe8\x88\xb1\xe5\xb7\xb2\xe5\xb0\xb1\xe7\xbb\xaa", now, 1800);  // 新的收容舱已就绪
     if (saveReady) saveNow(now, "rest_new");
     return;
   }
@@ -3467,12 +3765,12 @@ static void uiPressAction(uint32_t now) {
 
     enterState(ST_SIT, now);
     playRTTTLOnce(RTTTL_SLEEP_INTRO, AUDIO_PRIO_MED);
-    setMsg("\xe9\x86\x92\xe6\x9d\xa5\xe5\x95\xa6!", now, 1500);  // 醒来啦!
+    setMsg("\xe4\xbc\x91\xe6\x95\xb4\xe7\xbb\x93\xe6\x9d\x9f\xef\xbc\x8c\xe7\xbb\xa7\xe7\xbb\xad\xe5\xb7\xa1\xe6\x88\xbf!", now, 1800);  // 休整结束，继续巡房!
     uiSpriteDirty = true; uiForceBands = true;
     return;
   }
 
-  if (task.active) { setMsg("\xe6\xad\xa3\xe5\xbf\x99!", now, 1200); uiSpriteDirty = true; uiForceBands = true; return; }  // 正忙!
+  if (task.active) { setMsg("\xe5\xbd\x93\xe5\x89\x8d\xe6\xad\xa3\xe5\x9c\xa8\xe6\x89\xa7\xe8\xa1\x8c\xe5\xae\x89\xe6\x8e\x92!", now, 1400); uiSpriteDirty = true; uiForceBands = true; return; }  // 当前正在执行安排!
 
 uint8_t nbtn = uiButtonCount();
 if (nbtn != uiAliveCount()) return;
@@ -3482,7 +3780,7 @@ if (nbtn != uiAliveCount()) return;
   if ((int32_t)(now - cdUntil[(int)a]) < 0) {
     uint32_t sec = (cdUntil[(int)a] - now) / 1000UL;
     char tmp[48];
-    snprintf(tmp, sizeof(tmp), "\xe5\x86\xb7\xe5\x8d\xb4\xe4\xb8\xad(%lus)", (unsigned long)sec);  // 冷却中(Xs)
+    snprintf(tmp, sizeof(tmp), "\xe8\xae\xbe\xe6\x96\xbd\xe5\x86\xb7\xe5\x8d\xb4(%lus)", (unsigned long)sec);  // 设施冷却(Xs)
     setMsg(tmp, now, 1500);
     uiSpriteDirty = true; uiForceBands = true;
     return;
@@ -3531,13 +3829,13 @@ if (nbtn != uiAliveCount()) return;
 
       if (audioMode == AUDIO_OFF) {
         stopAudio();
-        setMsg("\xe9\x9f\xb3\xe9\xa2\x91\xe5\x85\xb3\xe9\x97\xad", now, 1500);    // 音频关闭
+        setMsg("\xe7\xbb\x88\xe7\xab\xaf\xe9\x9d\x99\xe9\x9f\xb3", now, 1500);    // 终端静音
       } else if (audioMode == AUDIO_LIMITED) {
         audioNextAlertAt = now + 20000UL;
-        setMsg("\xe9\x9f\xb3\xe9\xa2\x91\xe9\x99\x90\xe5\x88\xb6", now, 1500);    // 音频限制
+        setMsg("\xe7\xbb\x88\xe7\xab\xaf\xe4\xbd\x8e\xe6\x8f\x90\xe7\xa4\xba", now, 1500);    // 终端低提示
       } else {
         audioNextAlertAt = now + 10000UL;
-        setMsg("\xe9\x9f\xb3\xe9\xa2\x91\xe5\x85\xa8\xe5\xbc\x80", now, 1500);    // 音频全开
+        setMsg("\xe7\xbb\x88\xe7\xab\xaf\xe5\x85\xa8\xe6\x8f\x90\xe7\xa4\xba", now, 1500);    // 终端全提示
       }
 #if ENABLE_AUDIO
       if (saveReady) saveNow(now, "audio");
@@ -3961,7 +4259,7 @@ if (GROUND >= y && GROUND < y + bh) {
         band.setTextColor(TFT_WHITE, MG_SKY);
         band.setTextSize(1);
         band.setCursor(6, 4 - y);
-        band.print("\xe5\xb0\x8f\xe6\xb8\xb8\xe6\x88\x8f-\xe6\xb4\x97\xe6\xbe\xa1");  // 小游戏-洗澡
+        band.print("\xe5\x90\x8e\xe5\x8b\xa4\xe4\xbb\xbb\xe5\x8a\xa1-\xe6\xb8\x85\xe6\xb4\x81");  // 后勤任务-清洁
         resetFont(band);
       }
 
@@ -3994,7 +4292,7 @@ if (GROUND >= y && GROUND < y + bh) {
         band.setTextColor(TFT_WHITE, MG_SKY); // fond = ciel (ou mets juste TFT_WHITE)
         band.setTextSize(1);
         band.setCursor(6, 4 - y);
-        band.print("\xe5\xb0\x8f\xe6\xb8\xb8\xe6\x88\x8f-\xe7\x8e\xa9\xe8\x80\x8d");  // 小游戏-玩耍
+        band.print("\xe9\x99\xaa\xe6\x8a\xa4\xe4\xbb\xbb\xe5\x8a\xa1-\xe7\x8e\xa9\xe8\x80\x8d");  // 陪护任务-玩耍
         resetFont(band);
       }
 
@@ -4049,23 +4347,23 @@ if (y + bh > HUD_TOP) {
   band.setTextColor(TFT_BLACK);
   band.setCursor(7, ty1 + 1);
   if (appMode == MODE_MG_WASH) {
-    band.print("\xe6\xb0\xb4\xe6\xbb\xb4: "); band.print(mgDropsHit); band.print(" / 50");       // 水滴:
+    band.print("\xe6\xb8\x85\xe6\xb4\x81\xe8\xbf\x9b\xe5\xba\xa6: "); band.print(mgDropsHit); band.print(" / 50");       // 清洁进度:
   } else {
-    band.print("\xe6\xb0\x94\xe7\x90\x83: "); band.print(mgBalloonsCaught); band.print(" / 10");  // 气球:
+    band.print("\xe6\xb0\x94\xe6\xb3\xa1: "); band.print(mgBalloonsCaught); band.print(" / 10");  // 气泡:
   }
   band.setCursor(7, ty2 + 1);
-  band.print("\xe8\xb5\xa2\xe4\xba\x86\xe6\x89\x8d\xe8\x83\xbd\xe9\x80\x80\xe5\x87\xba");  // 赢了才能退出
+  band.print("\xe5\xae\x8c\xe6\x88\x90\xe4\xbb\xbb\xe5\x8a\xa1\xe5\x90\x8e\xe8\xbf\x94\xe5\x9b\x9e");  // 完成任务后返回
 
   // texte
   band.setTextColor(TFT_WHITE);
   band.setCursor(6, ty1);
   if (appMode == MODE_MG_WASH) {
-    band.print("\xe6\xb0\xb4\xe6\xbb\xb4: "); band.print(mgDropsHit); band.print(" / 50");       // 水滴:
+    band.print("\xe6\xb8\x85\xe6\xb4\x81\xe8\xbf\x9b\xe5\xba\xa6: "); band.print(mgDropsHit); band.print(" / 50");       // 清洁进度:
   } else {
-    band.print("\xe6\xb0\x94\xe7\x90\x83: "); band.print(mgBalloonsCaught); band.print(" / 10");  // 气球:
+    band.print("\xe6\xb0\x94\xe6\xb3\xa1: "); band.print(mgBalloonsCaught); band.print(" / 10");  // 气泡:
   }
   band.setCursor(6, ty2);
-  band.print("\xe8\xb5\xa2\xe4\xba\x86\xe6\x89\x8d\xe8\x83\xbd\xe9\x80\x80\xe5\x87\xba");  // 赢了才能退出
+  band.print("\xe5\xae\x8c\xe6\x88\x90\xe4\xbb\xbb\xe5\x8a\xa1\xe5\x90\x8e\xe8\xbf\x94\xe5\x9b\x9e");  // 完成任务后返回
   resetFont(band);
 }
 
@@ -4082,11 +4380,10 @@ if (y + bh > HUD_TOP) {
 // ================== RESET ==================
 static void resetStatsToDefault() {
   pet.faim=60; pet.soif=60; pet.hygiene=80; pet.humeur=60;
-  pet.energie=100; pet.fatigue=100; pet.amour=60; pet.caca=0;
+  pet.fatigue=100; pet.amour=60;
   pet.sante=80; pet.ageMin=0; pet.vivant=true;
   pet.stage=AGE_JUNIOR;
   pet.evolveProgressMin=0;
-  pet.poopAccidentLatched=false;
   strcpy(petName, "???");
 }
 
@@ -4126,6 +4423,16 @@ static void showHomeIntro(uint32_t now) {
   int x = (SW - imgW) / 2;
   int y = (SH - imgH) / 2;
   tft.pushImage(x, y, imgW, imgH, pageaccueil);
+
+  setCNFontTFT();
+  tft.setTextDatum(top_center);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.drawString("BeansPetGame", SW / 2, 10);
+  tft.setTextSize(1);
+  tft.drawString("\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe7\x85\xa7\xe6\x8a\xa4\xe7\xbb\x88\xe7\xab\xaf", SW / 2, 32);  // 罗德岛龙泡泡照护终端
+  tft.setTextDatum(top_left);
+  resetFontTFT();
 
 #if ENABLE_AUDIO
   if (audioMode != AUDIO_OFF) {
@@ -4321,17 +4628,27 @@ SH = tft.height();
   DZ_L = (int)(SW * 0.30f);
   DZ_R = (int)(SW * 0.60f);
 
+  timeSourceInit();
+
   uint32_t now = millis();
 
   bool loaded = false;
   if (saveReady) loaded = loadLatestSave(now);
 
   if (!loaded) {
+    offlineInfo = OfflineSettlementInfo{};
+    bootOfflineNotice[0] = 0;
     resetToEgg(now);
     if (saveReady) saveNow(now, "boot_new");
+  } else {
+    processOfflineSettlement(now);
   }
 
   showHomeIntro(now);
+  now = millis();
+  if (bootOfflineNotice[0] != 0) {
+    setMsg(bootOfflineNotice, now, OFFLINE_REPORT_MS);
+  }
 
   lastPetTick = now;
 
@@ -4389,10 +4706,10 @@ if (ENC_BTN >= 0) raw = (digitalRead(ENC_BTN) == LOW);
       // appliquer effets seulement ici
       if (mg.kind == TASK_WASH) {
         applyTaskEffects(TASK_WASH, now);
-        setMsg(mg.success ? "\xe6\xb4\x97\xe6\xbe\xa1\xe6\x88\x90\xe5\x8a\x9f!" : "\xe6\xb4\x97\xe6\xbe\xa1\xe5\xa4\xb1\xe8\xb4\xa5", now, 1500);  // 洗澡成功! / 洗澡失败
+        setMsg(mg.success ? "\xe6\xb8\x85\xe6\xb4\x81\xe5\xae\x8c\xe6\x88\x90!" : "\xe6\xb8\x85\xe6\xb4\x81\xe6\x9c\xaa\xe8\xbe\xbe\xe6\xa0\x87", now, 1500);  // 清洁完成! / 清洁未达标
       } else if (mg.kind == TASK_PLAY) {
         applyTaskEffects(TASK_PLAY, now);
-        setMsg(mg.success ? "\xe6\xb8\xb8\xe6\x88\x8f\xe8\x83\x9c\xe5\x88\xa9!" : "\xe6\xb8\xb8\xe6\x88\x8f\xe5\xa4\xb1\xe8\xb4\xa5", now, 1500);  // 游戏胜利! / 游戏失败
+        setMsg(mg.success ? "\xe9\x99\xaa\xe6\x8a\xa4\xe9\xa1\xba\xe5\x88\xa9!" : "\xe9\x99\xaa\xe6\x8a\xa4\xe6\x9c\xaa\xe8\xbe\xbe\xe6\xa0\x87", now, 1500);  // 陪护顺利! / 陪护未达标
       }
 
       mg.active = false;
@@ -4424,14 +4741,14 @@ if (ENC_BTN >= 0) raw = (digitalRead(ENC_BTN) == LOW);
   if (!berriesLeftAvailable && berriesRespawnAt != 0 && (int32_t)(now - berriesRespawnAt) >= 0) {
     berriesLeftAvailable = true;
     berriesRespawnAt = 0;
-    setMsg("\xe6\xb5\x86\xe6\x9e\x9c\xe5\xb7\xb2\xe6\x81\xa2\xe5\xa4\x8d", now, 1200);  // 浆果已恢复
+    setMsg("\xe8\xa1\xa5\xe7\xbb\x99\xe7\x82\xb9\xe5\xb7\xb2\xe8\xa1\xa5\xe8\xb4\xa7", now, 1200);  // 补给点已补货
   }
 
   // respawn flaque
   if (!puddleVisible && puddleRespawnAt != 0 && (int32_t)(now - puddleRespawnAt) >= 0) {
     puddleVisible = true;
     puddleRespawnAt = 0;
-    setMsg("\xe6\xb0\xb4\xe5\xb7\xb2\xe6\x81\xa2\xe5\xa4\x8d", now, 1200);  // 水已恢复
+    setMsg("\xe9\xa5\xae\xe6\xb0\xb4\xe7\xab\x99\xe5\xb7\xb2\xe8\xa1\xa5\xe6\xb0\xb4", now, 1200);  // 饮水站已补水
   }
 
   // hatch
@@ -4446,10 +4763,10 @@ if (ENC_BTN >= 0) raw = (digitalRead(ENC_BTN) == LOW);
         pet.stage = AGE_JUNIOR;
         pet.evolveProgressMin = 0;
 
-        getRandomDinoName(petName, sizeof(petName));
+        getRandomBeanName(petName, sizeof(petName));
 
         char txt[64];
-        snprintf(txt, sizeof(txt), "\xe5\xae\x83\xe5\x8f\xab %s", petName);  // 它叫 XXX
+        snprintf(txt, sizeof(txt), "\xe6\xa1\xa3\xe6\xa1\x88\xe7\x99\xbb\xe8\xae\xb0: %s", petName);  // 档案登记: XXX
         activityVisible = true;
         activityStart = now;
         activityEnd   = now + 4500;

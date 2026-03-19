@@ -1,4 +1,4 @@
-// DinoNamesCN.h
+// BeanNamesCN.h
 #pragma once
 
 #include <Arduino.h>
@@ -43,7 +43,7 @@ static inline uint16_t dinoCountCsvItems_P(const char* csvP) {
 }
 
 // 复制一个随机名字到 out（outSize 包含 '\0'）
-static inline void getRandomDinoName(char* out, size_t outSize) {
+static inline void getRandomBeanName(char* out, size_t outSize) {
   if (!out || outSize == 0) return;
   out[0] = '\0';
 
