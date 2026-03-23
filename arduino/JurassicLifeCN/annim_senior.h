@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-// Auto-generated: anim folder 'annim_senior' -> RGB565 (KEY transparency)
+// Auto-generated from assets manifest: animation set 'annim_senior.h' -> RGB565 (KEY transparency)
 // KEY (RGB565): 0xF81F
 
 namespace triceratops {

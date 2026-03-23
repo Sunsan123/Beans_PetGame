@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "domain": "ui",
+  "group": "core",
+  "pack": "ui_core",
+  "defaults": {
+    "kind": "single",
+    "processing": {
+      "trim": true,
+      "bgRemoval": "auto"
+    }
+  },
+  "assets": [
+    {
+      "id": "ui.screen.title.page_accueil",
+      "source": "src/ui/screens/title/page_accueil.png",
+      "tags": [
+        "ui",
+        "screen",
+        "title"
+      ],
+      "export": {
+        "header": "pageaccueil.h",
+        "symbol": "pageaccueil"
+      }
+    }
+  ]
+}

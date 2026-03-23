@@ -18,11 +18,11 @@
 #define ENABLE_AUDIO 1
 
 // >>> Stockage sauvegarde : LittleFS (interne) ou SD (microSD) <<<
-// ESP32-S3 utilise LittleFS par défaut (pas besoin de carte SD pour les sauvegardes)
-// Les autres cartes utilisent la SD comme avant.
-// Mettre à 1 pour forcer LittleFS, 0 pour forcer SD, ou laisser AUTO.
+// ESP32-S3 utilise maintenant la microSD par défaut pour les sauvegardes.
+// Les autres cartes utilisent déjà la SD.
+// Mettre à 1 pour forcer LittleFS, 0 pour forcer SD.
 #if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
-  #define USE_LITTLEFS_SAVE 1    // ESP32-S3 : LittleFS par défaut (16MB Flash)
+  #define USE_LITTLEFS_SAVE 0    // ESP32-S3 : microSD par défaut
 #else
   #define USE_LITTLEFS_SAVE 0    // Autres : SD par défaut
 #endif
@@ -114,10 +114,18 @@ enum GamePhase : uint8_t { PHASE_EGG, PHASE_HATCHING, PHASE_ALIVE, PHASE_RESTREA
 
 enum AudioMode : uint8_t { AUDIO_OFF, AUDIO_LIMITED, AUDIO_TOTAL };
 enum AudioPriority : uint8_t { AUDIO_PRIO_LOW, AUDIO_PRIO_MED, AUDIO_PRIO_HIGH };
+enum AutoBehaviorMoveMode : uint8_t { AUTO_MOVE_IDLE, AUTO_MOVE_WALK };
+enum AutoBehaviorArt : uint8_t { AUTO_ART_AUTO, AUTO_ART_MARCHE, AUTO_ART_ASSIE, AUTO_ART_CLIGNE, AUTO_ART_DODO, AUTO_ART_AMOUR, AUTO_ART_MANGE };
+enum SceneId : uint8_t { SCENE_DORM, SCENE_ACTIVITY, SCENE_DECK, SCENE_COUNT };
 struct AudioStep;
+struct AutoBehaviorDef;
+struct AutoBehaviorRuntime;
+struct DailyEventDef;
+struct DailyEventNotice;
+struct SceneConfig;
 
 // ================== APP MODE (gestion vs mini-jeux) ==================
-enum AppMode : uint8_t { MODE_PET, MODE_MG_WASH, MODE_MG_PLAY };
+enum AppMode : uint8_t { MODE_PET, MODE_MG_WASH, MODE_MG_PLAY, MODE_MODAL_REPORT, MODE_RTC_PROMPT, MODE_RTC_SET, MODE_MODAL_EVENT, MODE_SCENE_SELECT };
 static AppMode appMode = MODE_PET;
 
 struct MiniGameCtx {
@@ -128,6 +136,52 @@ struct MiniGameCtx {
   int score = 0;
 };
 static MiniGameCtx mg;
+
+struct ModalReportState {
+  bool pending = false;
+  bool active = false;
+  uint8_t lineCount = 0;
+  char lines[6][48];
+};
+static ModalReportState offlineReportModal;
+
+struct DailyEventModalState {
+  bool pending = false;
+  bool active = false;
+};
+static DailyEventModalState dailyEventModal;
+
+struct SceneModalState {
+  bool active = false;
+  SceneId sel = SCENE_DORM;
+};
+static SceneModalState sceneModal;
+
+struct RtcPromptState {
+  bool pending = false;
+  uint8_t sel = 1;  // 0=skip, 1=set
+};
+static RtcPromptState rtcPromptModal;
+
+struct RtcSetDraft {
+  int year = 2026;
+  int month = 1;
+  int day = 1;
+  int hour = 12;
+  int minute = 0;
+  uint8_t field = 0;
+};
+static RtcSetDraft rtcDraft;
+
+struct ModalTouchState {
+  bool rawDown = false;
+  bool stableDown = false;
+  uint32_t lastChange = 0;
+  int16_t x = 0;
+  int16_t y = 0;
+};
+static ModalTouchState modalTouch;
+static const uint32_t MODAL_TOUCH_DEBOUNCE_MS = 25;
 
 struct RainDrop {
   float x = 0;
@@ -183,15 +237,30 @@ static const uint16_t MG_GLINE  = 0x05E0; // vert plus foncé (ligne du sol)
 static inline uint16_t btnColorForAction(UiAction a);
 static inline const char* btnLabel(UiAction a);
 static inline const char* stageLabel(AgeStage s);
+static inline uint16_t frameMsForState(TriState st);
 static void enterState(TriState st, uint32_t now);
 static bool startTask(TaskKind k, uint32_t now);
 static void resetToEgg(uint32_t now);
 static void handleDeath(uint32_t now);
+static void updateHealthTick(uint32_t now);
 static void eraseSavesAndRestart();
 
 // AJOUT (tactile) : prototypes pour éviter tout souci d'auto-prototypes Arduino
 static void uiPressAction(uint32_t now);
 static void handleTouchUI(uint32_t now);
+static void handleModalUI(uint32_t now);
+static void openOfflineReportModal();
+static void openRtcPromptModal();
+static void openSceneSelectModal(uint32_t now);
+static void switchSceneByOffset(int delta, uint32_t now);
+static inline bool readTouchRaw(int16_t &x, int16_t &y);
+static void trimAscii(char* s);
+static void initAutoBehaviorTable();
+static void initDailyEventTable();
+static void processDailyEvents(uint32_t now, bool fromBoot);
+static void maybeOpenPendingDailyEventModal();
+static void clearAutoBehavior();
+static void applySceneConfig(SceneId sceneId, bool keepRelativePosition);
 
 // Mini-jeux
 static void mgBegin(TaskKind k, uint32_t now);
@@ -220,6 +289,7 @@ extern bool saveReady;   // save filesystem ready (LittleFS ou SD)
 // 注意: 中文字体需要更多 Flash 空间 (~200-300KB)
 #include <ctype.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <SPI.h>
@@ -228,43 +298,66 @@ extern bool saveReady;   // save filesystem ready (LittleFS ou SD)
   #include <LittleFS.h>
 #endif
 #include <ArduinoJson.h>
+#include "AutoBehaviorTableCN.h"
+#include "DailyEventTableCN.h"
 
 #include "DinoNamesCN.h"
 #include "JurassicMusicRTTTL.h"
-#include "pageaccueil.h"
+#include "AssetRegistry.h"
+#include "RuntimeAssetManager.h"
 
-// ================== ASSETS (namespaces rename) ==================
-#define triceratops triJ
-#include "annim_junior.h"
-#undef triceratops
+static const char* RUNTIME_ASSET_BASE_PATH = "/assets/runtime";
+static BeansAssets::RuntimeAssetManager runtimeAssetManager(24576);
+static bool runtimeAssetsReady = false;
+struct RuntimeSingleSpriteCache {
+  BeansAssets::AssetId assetId;
+  bool attempted = false;
+  bool loaded = false;
+  uint16_t w = 0;
+  uint16_t h = 0;
+  uint16_t key565 = 0;
+  uint16_t* pixels = nullptr;
+};
+static RuntimeSingleSpriteCache runtimeSingleCaches[] = {
+  {BeansAssets::AssetId::UiScreenTitlePageAccueil},
+  {BeansAssets::AssetId::SceneCommonPropMountain},
+  {BeansAssets::AssetId::SceneCommonPropTreeBroadleaf},
+  {BeansAssets::AssetId::SceneCommonPropTreePine},
+  {BeansAssets::AssetId::SceneCommonPropBushBerry},
+  {BeansAssets::AssetId::SceneCommonPropBushPlain},
+  {BeansAssets::AssetId::SceneCommonPropPuddle},
+  {BeansAssets::AssetId::SceneCommonPropCloud},
+  {BeansAssets::AssetId::SceneCommonPropBalloon},
+  {BeansAssets::AssetId::PropGameplayGraveMarker},
+};
 
-#define triceratops triA
-#include "annim_adul.h"
-#undef triceratops
+struct RuntimeAnimationFrameView {
+  const uint16_t* pixels = nullptr;
+  uint16_t w = 0;
+  uint16_t h = 0;
+  uint16_t key565 = 0;
+};
 
-#define triceratops triS
-#include "annim_senior.h"
-#undef triceratops
+struct RuntimeAnimationFrameCacheEntry {
+  bool loaded = false;
+  char packId[32] = {0};
+  char assetId[64] = {0};
+  uint16_t frameIndex = 0;
+  uint16_t w = 0;
+  uint16_t h = 0;
+  uint16_t key565 = 0;
+  uint16_t* pixels = nullptr;
+  size_t bytes = 0;
+  uint32_t lastUsed = 0;
+};
 
-#define dino egg
-#include "annim_oeuf.h"
-#undef dino
+static const size_t RUNTIME_FRAME_CACHE_LIMIT_BYTES = 128U * 1024U;
+static RuntimeAnimationFrameCacheEntry runtimeFrameCaches[8];
+static size_t runtimeFrameCacheBytes = 0;
+static uint32_t runtimeFrameCacheTick = 0;
 
-#define dino poop
-#include "annim_caca.h"
-#undef dino
-
-#include "tombe.h"
 
 // Décor
-#include "montagne.h"
-#include "sapin.h"
-#include "arbre.h"
-#include "buissonbaie.h"
-#include "buissonsansbaie.h"
-#include "flaque_eau_60x25.h"
-#include "nuage.h"
-#include "ballon.h"
 
 #ifndef TFT_BLACK
   #define TFT_BLACK 0x0000
@@ -396,29 +489,6 @@ static const uint16_t KEY      = 0xF81F;
 static const uint16_t KEY_SWAP = 0x1FF8;
 
 // ================== ALIAS décor ==================
-#define MONT_W    montagne_W
-#define MONT_H    montagne_H
-#define MONT_IMG  montagne
-
-#define SAPIN_W   sapin_W
-#define SAPIN_H   sapin_H
-#define SAPIN_IMG sapin
-
-#define ARBRE_W   arbre_W
-#define ARBRE_H   arbre_H
-#define ARBRE_IMG arbre
-
-#define BBAIE_W   buissonbaie_W
-#define BBAIE_H   buissonbaie_H
-#define BBAIE_IMG buissonbaie
-
-#define BSANS_W   buissonsansbaie_W
-#define BSANS_H   buissonsansbaie_H
-#define BSANS_IMG buissonsansbaie
-
-#define FLAQUE_W   flaque_eau_60x25_W
-#define FLAQUE_H   flaque_eau_60x25_H
-#define FLAQUE_IMG flaque_eau_60x25
 
 // ================== ÉCRAN ==================
 #if DISPLAY_PROFILE == DISPLAY_PROFILE_ESP32S3_ST7789
@@ -1090,6 +1160,7 @@ static const uint16_t C_SKY     = 0x7D7C;
 static const uint16_t C_GROUND  = 0x23E7;
 static const uint16_t C_GROUND2 = 0x1B45;
 static const uint16_t C_GLINE   = 0x2C48;
+static const uint32_t LUNGMEN_COIN_PER_MIN = 1UL;
 
 static inline int imod(int a, int m) { int r = a % m; return (r < 0) ? r + m : r; }
 static inline int clampi(int v, int lo, int hi) { if (v < lo) return lo; if (v > hi) return hi; return v; }
@@ -1115,6 +1186,7 @@ struct PetStats {
 
   float sante   = 80;
   uint32_t ageMin = 0;
+  uint32_t lungmenCoin = 0;
   bool vivant = true;
 
   AgeStage stage = AGE_JUNIOR;
@@ -1524,7 +1596,7 @@ static inline UiAction uiAliveActionAt(uint8_t idx) {
 static bool activityVisible = false;
 static uint32_t activityStart = 0;
 static uint32_t activityEnd   = 0;
-static char activityText[64]  = {0};
+static char activityText[96]  = {0};
 
 // IMPORTANT: pour que la barre se remplisse progressivement,
 // on force une reconstruction UI régulière tant que activityVisible==true.
@@ -1534,7 +1606,7 @@ static const uint32_t ACTIVITY_UI_REFRESH_MS = 120; // ~8 fps
 // message court -> utilise la barre activité
 static bool showMsg = false;
 static uint32_t msgUntil = 0;
-static char msgText[64] = {0};
+static char msgText[96] = {0};
 static bool offlineSettlementInProgress = false;
 
 static void setMsg(const char* s, uint32_t now, uint32_t dur=1500) {
@@ -1564,6 +1636,32 @@ static bool uiSpriteDirty = true;
 static bool uiForceBands  = true;
 
 // ================== MONDE 2× écran + objets ==================
+struct SceneConfig {
+  SceneId id = SCENE_DORM;
+  const char* name = "";
+  float worldScreens = 2.0f;
+  float homeRatio = 0.5f;
+  float supplyLeftX = 24.0f;
+  float waterRightMargin = 28.0f;
+  uint16_t skyColor = C_SKY;
+  uint16_t groundColor = C_GROUND;
+  uint16_t groundLineColor = C_GLINE;
+  uint16_t accentA = 0xFFFF;
+  uint16_t accentB = 0x7BEF;
+  uint16_t accentC = 0x39C7;
+  bool showMountains = true;
+  bool showTrees = true;
+  bool showClouds = false;
+  bool indoor = false;
+};
+
+static const SceneConfig kSceneConfigs[SCENE_COUNT] = {
+  { SCENE_DORM,     "宿舍",   2.0f, 0.50f, 24.0f, 30.0f, 0xD6FA, 0xC4A3, 0x93AE, 0xF75F, 0xAD55, 0x6B6D, false, false, false, true  },
+  { SCENE_ACTIVITY, "活动室", 2.2f, 0.50f, 30.0f, 34.0f, 0xC77C, 0x9E7A, 0x6D76, 0xFFE0, 0x07FF, 0xFD20, false, false, false, true  },
+  { SCENE_DECK,     "甲板",   2.4f, 0.50f, 26.0f, 30.0f, C_SKY,   C_GROUND, C_GLINE, 0xFFFF, 0xBDF7, 0x39C7, true,  true,  true,  false },
+};
+
+static SceneId currentScene = SCENE_DORM;
 static float worldW = 640.0f;
 static float worldMin = 0.0f;
 static float worldMax = 640.0f;
@@ -1572,6 +1670,22 @@ static float homeX = 320.0f;
 
 static float bushLeftX  = 20.0f;
 static float puddleX    = 0.0f;
+
+static inline const SceneConfig& currentSceneConfig() {
+  return kSceneConfigs[(int)clampi((int)currentScene, 0, (int)SCENE_COUNT - 1)];
+}
+
+static inline const char* sceneLabel(SceneId id) {
+  return kSceneConfigs[(int)clampi((int)id, 0, (int)SCENE_COUNT - 1)].name;
+}
+
+static inline int sceneSupplyPropWidth() {
+  return (currentScene == SCENE_ACTIVITY) ? 30 : 34;
+}
+
+static inline int sceneWaterPropWidth() {
+  return (currentScene == SCENE_DECK) ? 32 : 28;
+}
 
 static bool  berriesLeftAvailable = true;
 static uint32_t berriesRespawnAt = 0;
@@ -1608,9 +1722,163 @@ static bool  idleWalking = false;
 static uint32_t idleUntil = 0;
 static uint32_t nextIdleDecisionAt = 0;
 
+static const uint8_t AUTO_BEHAVIOR_MAX = 16;
+static const uint32_t AUTO_BEHAVIOR_MIN_GAP_MS = 800UL;
+static const uint32_t AUTO_BEHAVIOR_MAX_GAP_MS = 2400UL;
+static const uint32_t AUTO_BEHAVIOR_BUBBLE_MS = 2200UL;
+
+struct AutoBehaviorDef {
+  bool enabled = false;
+  uint16_t weight = 0;
+  AutoBehaviorMoveMode moveMode = AUTO_MOVE_IDLE;
+  AutoBehaviorArt art = AUTO_ART_AUTO;
+  uint16_t minMs = 1200;
+  uint16_t maxMs = 2400;
+  char behavior[16] = {0};
+  char bubble[72] = {0};
+};
+static AutoBehaviorDef autoBehaviorDefs[AUTO_BEHAVIOR_MAX];
+static uint8_t autoBehaviorCount = 0;
+static bool autoBehaviorTableReady = false;
+static char autoBehaviorLoadNote[64] = {0};
+
+struct AutoBehaviorRuntime {
+  bool active = false;
+  int8_t index = -1;
+  AutoBehaviorMoveMode moveMode = AUTO_MOVE_IDLE;
+  AutoBehaviorArt art = AUTO_ART_AUTO;
+  uint32_t until = 0;
+  uint32_t bubbleUntil = 0;
+  char name[16] = {0};
+  char bubble[48] = {0};
+};
+static AutoBehaviorRuntime autoBehavior;
+
+static const uint8_t DAILY_EVENT_MAX = 16;
+static const uint8_t DAILY_EVENT_QUEUE_MAX = 8;
+
+struct DailyEventDef {
+  bool enabled = false;
+  uint16_t weight = 0;
+  AutoBehaviorArt art = AUTO_ART_AUTO;
+  char eventName[20] = {0};
+  char summary[56] = {0};
+  int8_t deltaFaim = 0;
+  int8_t deltaSoif = 0;
+  int8_t deltaFatigue = 0;
+  int8_t deltaHygiene = 0;
+  int8_t deltaHumeur = 0;
+  int8_t deltaAmour = 0;
+  int8_t deltaSante = 0;
+};
+static DailyEventDef dailyEventDefs[DAILY_EVENT_MAX];
+static uint8_t dailyEventCount = 0;
+static bool dailyEventTableReady = false;
+
+struct DailyEventNotice {
+  bool valid = false;
+  bool offline = false;
+  uint32_t dayIndex = 0;
+  AutoBehaviorArt art = AUTO_ART_AUTO;
+  char eventName[20] = {0};
+  char summary[56] = {0};
+  int8_t deltaFaim = 0;
+  int8_t deltaSoif = 0;
+  int8_t deltaFatigue = 0;
+  int8_t deltaHygiene = 0;
+  int8_t deltaHumeur = 0;
+  int8_t deltaAmour = 0;
+  int8_t deltaSante = 0;
+};
+static DailyEventNotice dailyEventQueue[DAILY_EVENT_QUEUE_MAX];
+static uint8_t dailyEventQueueCount = 0;
+static uint32_t lastDailyEventDay = 0;
+static uint32_t nextDailyEventCheckAt = 0;
+
 // hatch
 static uint8_t hatchIdx = 0;
 static uint32_t hatchNext = 0;
+
+static AutoBehaviorArt defaultAutoArtForMove(AutoBehaviorMoveMode moveMode) {
+  return (moveMode == AUTO_MOVE_WALK) ? AUTO_ART_MARCHE : AUTO_ART_ASSIE;
+}
+
+static uint8_t autoBehaviorAnimIdForStage(AgeStage stg, AutoBehaviorArt art) {
+  return BeansAssets::triceratopsAnimIdForArt(stg, art);
+}
+
+static void chooseBehaviorBubbleText(const char* src, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  dst[0] = 0;
+  if (!src || src[0] == 0) return;
+
+  const char* options[6] = {0};
+  uint8_t count = 0;
+  const char* segStart = src;
+  for (const char* p = src; ; ++p) {
+    if (*p == '|' || *p == 0) {
+      if (count < 6) options[count++] = segStart;
+      if (*p == 0) break;
+      segStart = p + 1;
+    }
+  }
+  if (count == 0) return;
+
+  uint8_t pick = (uint8_t)random(0, count);
+  const char* start = options[pick];
+  const char* end = start;
+  while (*end && *end != '|') end++;
+  size_t len = (size_t)(end - start);
+  if (len >= dstSize) len = dstSize - 1;
+  memcpy(dst, start, len);
+  dst[len] = 0;
+  trimAscii(dst);
+}
+
+static void clearAutoBehavior() {
+  memset(&autoBehavior, 0, sizeof(autoBehavior));
+  autoBehavior.index = -1;
+  idleWalking = false;
+  idleUntil = 0;
+}
+
+static void clearDailyEventQueue() {
+  memset(dailyEventQueue, 0, sizeof(dailyEventQueue));
+  dailyEventQueueCount = 0;
+  dailyEventModal.pending = false;
+  dailyEventModal.active = false;
+}
+
+static bool enqueueDailyEventNotice(const DailyEventNotice& src) {
+  if (dailyEventQueueCount >= DAILY_EVENT_QUEUE_MAX) return false;
+  dailyEventQueue[dailyEventQueueCount++] = src;
+  dailyEventQueue[dailyEventQueueCount - 1].valid = true;
+  dailyEventModal.pending = (dailyEventQueueCount > 0);
+  return true;
+}
+
+static bool hasPendingDailyEventNotice() {
+  return dailyEventQueueCount > 0 && dailyEventQueue[0].valid;
+}
+
+static const DailyEventNotice* currentDailyEventNotice() {
+  return hasPendingDailyEventNotice() ? &dailyEventQueue[0] : nullptr;
+}
+
+static void popDailyEventNotice() {
+  if (!hasPendingDailyEventNotice()) {
+    clearDailyEventQueue();
+    return;
+  }
+  for (uint8_t i = 1; i < dailyEventQueueCount; ++i) {
+    dailyEventQueue[i - 1] = dailyEventQueue[i];
+  }
+  if (dailyEventQueueCount > 0) dailyEventQueueCount--;
+  if (dailyEventQueueCount < DAILY_EVENT_QUEUE_MAX) {
+    memset(&dailyEventQueue[dailyEventQueueCount], 0, sizeof(dailyEventQueue[0]));
+  }
+  dailyEventModal.pending = (dailyEventQueueCount > 0);
+}
 
 // ================== Durée / gain par âge ==================
 static inline float durMulForStage(AgeStage s) {
@@ -1646,90 +1914,20 @@ static inline float moveSpeedPxPerFrame() {
   return sp;
 }
 
-// ================== triceratops frames (3 namespaces) ==================
-static inline const uint16_t* triGetFrame_J(triJ::AnimId anim, uint8_t frameIndex) {
-  triJ::AnimDesc ad; memcpy_P(&ad, &triJ::ANIMS[anim], sizeof(ad));
-  if (ad.count == 0) return nullptr;
-  frameIndex %= ad.count;
-  const uint16_t* framePtr = nullptr;
-  memcpy_P(&framePtr, &ad.frames[frameIndex], sizeof(framePtr));
-  return framePtr;
-}
-static inline uint8_t triAnimCount_J(triJ::AnimId anim) {
-  triJ::AnimDesc ad; memcpy_P(&ad, &triJ::ANIMS[anim], sizeof(ad));
-  return ad.count;
-}
-static inline const uint16_t* triGetFrame_A(triA::AnimId anim, uint8_t frameIndex) {
-  triA::AnimDesc ad; memcpy_P(&ad, &triA::ANIMS[anim], sizeof(ad));
-  if (ad.count == 0) return nullptr;
-  frameIndex %= ad.count;
-  const uint16_t* framePtr = nullptr;
-  memcpy_P(&framePtr, &ad.frames[frameIndex], sizeof(framePtr));
-  return framePtr;
-}
-static inline uint8_t triAnimCount_A(triA::AnimId anim) {
-  triA::AnimDesc ad; memcpy_P(&ad, &triA::ANIMS[anim], sizeof(ad));
-  return ad.count;
-}
-static inline const uint16_t* triGetFrame_S(triS::AnimId anim, uint8_t frameIndex) {
-  triS::AnimDesc ad; memcpy_P(&ad, &triS::ANIMS[anim], sizeof(ad));
-  if (ad.count == 0) return nullptr;
-  frameIndex %= ad.count;
-  const uint16_t* framePtr = nullptr;
-  memcpy_P(&framePtr, &ad.frames[frameIndex], sizeof(framePtr));
-  return framePtr;
-}
-static inline uint8_t triAnimCount_S(triS::AnimId anim) {
-  triS::AnimDesc ad; memcpy_P(&ad, &triS::ANIMS[anim], sizeof(ad));
-  return ad.count;
-}
-
 static inline uint8_t animIdForState(AgeStage stg, TriState st) {
-  if (stg == AGE_JUNIOR) {
-    switch (st) {
-      case ST_SIT:   return (uint8_t)triJ::ANIM_JUNIOR_ASSIE;
-      case ST_BLINK: return (uint8_t)triJ::ANIM_JUNIOR_CLIGNE;
-      case ST_EAT:   return (uint8_t)triJ::ANIM_JUNIOR_MANGE;
-      case ST_SLEEP: return (uint8_t)triJ::ANIM_JUNIOR_DODO;
-      default:       return (uint8_t)triJ::ANIM_JUNIOR_MARCHE;
-    }
-  } else if (stg == AGE_ADULTE) {
-    switch (st) {
-      case ST_SIT:   return (uint8_t)triA::ANIM_ADULTE_ASSIE;
-      case ST_BLINK: return (uint8_t)triA::ANIM_ADULTE_CLIGNE;
-      case ST_EAT:   return (uint8_t)triA::ANIM_ADULTE_MANGE;
-      case ST_SLEEP: return (uint8_t)triA::ANIM_ADULTE_DODO;
-      default:       return (uint8_t)triA::ANIM_ADULTE_MARCHE;
-    }
-  } else {
-    switch (st) {
-      case ST_SIT:   return (uint8_t)triS::ANIM_SENIOR_ASSIE;
-      case ST_BLINK: return (uint8_t)triS::ANIM_SENIOR_CLIGNE;
-      case ST_EAT:   return (uint8_t)triS::ANIM_SENIOR_MANGE;
-      case ST_SLEEP: return (uint8_t)triS::ANIM_SENIOR_DODO;
-      default:       return (uint8_t)triS::ANIM_SENIOR_MARCHE;
-    }
-  }
+  return BeansAssets::triceratopsAnimIdForState(stg, st);
 }
 static inline uint8_t triAnimCount(AgeStage stg, uint8_t animId) {
-  if (stg == AGE_JUNIOR) return triAnimCount_J((triJ::AnimId)animId);
-  if (stg == AGE_ADULTE) return triAnimCount_A((triA::AnimId)animId);
-  return triAnimCount_S((triS::AnimId)animId);
+  return BeansAssets::triceratopsAnimCount(stg, animId);
 }
 static inline const uint16_t* triGetFrame(AgeStage stg, uint8_t animId, uint8_t idx) {
-  if (stg == AGE_JUNIOR) return triGetFrame_J((triJ::AnimId)animId, idx);
-  if (stg == AGE_ADULTE) return triGetFrame_A((triA::AnimId)animId, idx);
-  return triGetFrame_S((triS::AnimId)animId, idx);
+  return BeansAssets::triceratopsFrame(stg, animId, idx);
 }
 static inline int triW(AgeStage stg) {
-  if (stg == AGE_JUNIOR) return (int)triJ::W;
-  if (stg == AGE_ADULTE) return (int)triA::W;
-  return (int)triS::W;
+  return BeansAssets::triceratopsWidth(stg);
 }
 static inline int triH(AgeStage stg) {
-  if (stg == AGE_JUNIOR) return (int)triJ::H;
-  if (stg == AGE_ADULTE) return (int)triA::H;
-  return (int)triS::H;
+  return BeansAssets::triceratopsHeight(stg);
 }
 
 // ================== DRAW IMAGE KEYED ==================
@@ -1757,6 +1955,23 @@ static void drawImageKeyedOnBand(const uint16_t* img565, int w, int h, int x, in
       uint16_t c = pgm_read_word(&img565[j * w + sx]);
       if (c == KEY || c == KEY_SWAP) continue;
       if (swap16(c) == KEY) continue;
+      if (shade) c = darken565(c, shade);
+      band.drawPixel(xx, yy, c);
+    }
+  }
+}
+
+static void drawImageKeyedOnBandRAM(const uint16_t* img565, uint16_t key565, int w, int h, int x, int y, bool flipX=false, uint8_t shade=0) {
+  if (!img565) return;
+  for (int j = 0; j < h; j++) {
+    int yy = y + j;
+    if (yy < 0 || yy >= band.height()) continue;
+    for (int i = 0; i < w; i++) {
+      int xx = x + i;
+      if (xx < 0 || xx >= band.width()) continue;
+      int sx = flipX ? (w - 1 - i) : i;
+      uint16_t c = img565[j * w + sx];
+      if (c == key565) continue;
       if (shade) c = darken565(c, shade);
       band.drawPixel(xx, yy, c);
     }
@@ -1864,12 +2079,36 @@ static inline uint8_t uiButtonCount() {
   return uiAliveCount();
 
 }
-static inline int uiButtonWidth(uint8_t nbtn) {
-  const int GAP = 6;
-  int totalGap = ((int)nbtn - 1) * GAP;
-  int bw = (SW - totalGap) / (int)nbtn;
+static inline bool uiShowSceneArrows() {
+  return phase == PHASE_ALIVE && state != ST_SLEEP;
+}
+static inline int uiBottomGap() { return 3; }
+static inline int uiBottomY() { return 8; }
+static inline int uiBottomButtonH() { return UI_BOT_H - (uiBottomY() * 2); }
+static inline int uiSceneArrowW() { return (SW <= 240) ? 10 : 14; }
+static inline int uiSceneArrowH() { return uiBottomButtonH(); }
+static inline int uiSceneArrowLeftX() { return 2; }
+static inline int uiSceneArrowRightX() { return SW - 2 - uiSceneArrowW(); }
+static void calcBottomActionLayout(uint8_t nbtn, int& startX, int& bw, int& bh, int& yy, int& gap) {
+  gap = uiBottomGap();
+  yy = uiBottomY();
+  bh = uiBottomButtonH();
+  int innerLeft = 0;
+  int innerRight = SW;
+  if (uiShowSceneArrows()) {
+    innerLeft = uiSceneArrowLeftX() + uiSceneArrowW() + 4;
+    innerRight = uiSceneArrowRightX() - 4;
+  }
+  int innerW = max(1, innerRight - innerLeft);
+  int totalGap = max(0, ((int)nbtn - 1) * gap);
+  bw = max(1, (innerW - totalGap) / max(1, (int)nbtn));
   if (bw > 56) bw = 56;
-  if (bw < 42) bw = max(1, bw);
+  int totalW = (int)nbtn * bw + totalGap;
+  startX = innerLeft + max(0, (innerW - totalW) / 2);
+}
+static inline int uiButtonWidth(uint8_t nbtn) {
+  int startX = 0, bh = 0, yy = 0, gap = 0, bw = 0;
+  calcBottomActionLayout(nbtn, startX, bw, bh, yy, gap);
   return bw;
 }
 static inline const char* uiSingleLabel() {
@@ -1977,11 +2216,11 @@ static uint32_t cdUntil[UI_COUNT] = {0};
 
 // ================== Positions “stop” (manger/boire) ==================
 static float eatSpotX() {
-  // dino doit être à DROITE du buisson et regarder à gauche
-  return bushLeftX + (float)(BBAIE_W - 18 + EAT_SPOT_OFFSET);
+  // dino doit être à DROITE du补给点并回头取物
+  return bushLeftX + (float)(sceneSupplyPropWidth() - 18 + EAT_SPOT_OFFSET);
 }
 static float drinkSpotX() {
-  // dino doit être à GAUCHE de la flaque et regarder à droite
+  // dino doit être à GAUCHE de饮水点并回头补水
   return puddleX - (float)(triW(pet.stage) - 22) + (float)DRINK_SPOT_OFFSET;
 }
 
@@ -2048,8 +2287,9 @@ static const int SD_SCK  = 36;   // ESP32-S3 SD pins
 static const int SD_MISO = 37;
 static const int SD_MOSI = 35;
 static const int SD_CS   = 38;
-// ESP32-S3 : SPI3_HOST (équivalent de HSPI sur S3)
-static SPIClass sdSPI(SPI3_HOST);
+// ESP32-S3 : Arduino core 3.x exposes HSPI/FSPI bus ids.
+// Use HSPI here to keep the SD bus separate from the TFT bus.
+static SPIClass sdSPI(HSPI);
 #else
 static const int SD_SCK  = 18;
 static const int SD_MISO = 19;
@@ -2083,7 +2323,9 @@ static bool nextSlotIsA = true;  // alterne A/B
 static bool savedTimeValid = false;
 static uint32_t savedLastUnixTime = 0;
 static bool savedWasSleeping = false;
-static char bootOfflineNotice[64] = {0};
+static char bootOfflineNotice[96] = {0};
+static char bootStorageNotice[96] = {0};
+static uint16_t bootStorageNoticeColor = TFT_WHITE;
 
 static inline int iClamp(int v, int lo, int hi){ if(v<lo) return lo; if(v>hi) return hi; return v; }
 static inline int fToI100(float f){ return iClamp((int)lroundf(f), 0, 100); }
@@ -2092,12 +2334,31 @@ struct OfflineSettlementInfo {
   bool checked = false;
   bool applied = false;
   bool skippedNoClock = false;
+  bool skippedInvalidRtc = false;
   bool skippedNoSavedTime = false;
   bool skippedInvalidDelta = false;
   bool capped = false;
   uint32_t elapsedSec = 0;
   uint32_t appliedMin = 0;
   bool petDied = false;
+  bool sleepingMode = false;
+  bool supplyRespawned = false;
+  bool waterRespawned = false;
+  bool stageChanged = false;
+  bool phaseChanged = false;
+  bool endedCritical = false;
+  int16_t deltaFaim = 0;
+  int16_t deltaSoif = 0;
+  int16_t deltaHygiene = 0;
+  int16_t deltaHumeur = 0;
+  int16_t deltaFatigue = 0;
+  int16_t deltaAmour = 0;
+  int16_t deltaSante = 0;
+  int32_t deltaCoin = 0;
+  AgeStage stageBefore = AGE_JUNIOR;
+  AgeStage stageAfter = AGE_JUNIOR;
+  GamePhase phaseBefore = PHASE_EGG;
+  GamePhase phaseAfter = PHASE_EGG;
 };
 static OfflineSettlementInfo offlineInfo;
 
@@ -2219,7 +2480,11 @@ static bool timeSourceInit() {
   if (rtcInitTried) return rtcPresent && rtcTimeValid;
   rtcInitTried = true;
 
-  rtcPresent = rtcProbeDevice();
+  rtcPresent = false;
+  for (uint8_t attempt = 0; attempt < 8 && !rtcPresent; ++attempt) {
+    rtcPresent = rtcProbeDevice();
+    if (!rtcPresent) delay(50);
+  }
   if (!rtcPresent) {
     Serial.printf("[TIME] DS3231 not found on I2C SDA=%d SCL=%d\n", RTC_SDA, RTC_SCL);
     rtcTimeValid = false;
@@ -2247,8 +2512,140 @@ static bool readCurrentUnixTime(uint32_t& outUnixTime) {
   return rtcTimeValid;
 }
 
+static inline int16_t roundDelta(float after, float before) {
+  return (int16_t)lroundf(after - before);
+}
+
+static void appendNoticeTag(char* dst, size_t dstSize, const char* tag) {
+  size_t len = strlen(dst);
+  if (len + 1 >= dstSize) return;
+  strncat(dst, tag, dstSize - len - 1);
+}
+
+static inline uint8_t decToBcd(uint8_t v) {
+  return (uint8_t)(((v / 10U) << 4) | (v % 10U));
+}
+
+static uint8_t rtcWeekdayFromDate(int year, int month, int day) {
+  int32_t days = daysFromCivil(year, (unsigned)month, (unsigned)day);
+  if (days < 0) return 1;
+  return (uint8_t)(((days + 4) % 7 + 7) % 7 + 1);
+}
+
+static int buildMonthFromName(const char* mon) {
+  static const char* kMonths[12] = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+  for (int i = 0; i < 12; ++i) {
+    if (strncmp(mon, kMonths[i], 3) == 0) return i + 1;
+  }
+  return 1;
+}
+
+static void resetRtcDraftFromBuildTime() {
+  const char* d = __DATE__;
+  const char* t = __TIME__;
+  rtcDraft.year = atoi(d + 7);
+  rtcDraft.month = buildMonthFromName(d);
+  rtcDraft.day = atoi(d + 4);
+  rtcDraft.hour = ((t[0] - '0') * 10) + (t[1] - '0');
+  rtcDraft.minute = ((t[3] - '0') * 10) + (t[4] - '0');
+  rtcDraft.field = 0;
+}
+
+static void rtcClampDraft() {
+  rtcDraft.year = clampi(rtcDraft.year, 2024, 2099);
+  rtcDraft.month = clampi(rtcDraft.month, 1, 12);
+  rtcDraft.day = clampi(rtcDraft.day, 1, (int)daysInMonth(rtcDraft.year, rtcDraft.month));
+  rtcDraft.hour = clampi(rtcDraft.hour, 0, 23);
+  rtcDraft.minute = clampi(rtcDraft.minute, 0, 59);
+}
+
+static bool rtcWriteRegisters(uint8_t reg, const uint8_t* src, size_t len) {
+  if (!rtcEnsureWire()) return false;
+  Wire.beginTransmission(RTC_DS3231_ADDR);
+  Wire.write(reg);
+  for (size_t i = 0; i < len; ++i) Wire.write(src[i]);
+  return Wire.endTransmission() == 0;
+}
+
+static bool rtcWriteDraftToChip() {
+  rtcClampDraft();
+  uint8_t raw[7];
+  raw[0] = decToBcd(0);
+  raw[1] = decToBcd((uint8_t)rtcDraft.minute);
+  raw[2] = decToBcd((uint8_t)rtcDraft.hour);
+  raw[3] = decToBcd(rtcWeekdayFromDate(rtcDraft.year, rtcDraft.month, rtcDraft.day));
+  raw[4] = decToBcd((uint8_t)rtcDraft.day);
+  raw[5] = decToBcd((uint8_t)rtcDraft.month);
+  raw[6] = decToBcd((uint8_t)(rtcDraft.year - 2000));
+  if (!rtcWriteRegisters(0x00, raw, sizeof(raw))) return false;
+
+  uint8_t status = 0;
+  if (!rtcReadRegisters(0x0F, &status, 1)) return false;
+  status &= (uint8_t)~0x80U;
+  if (!rtcWriteRegisters(0x0F, &status, 1)) return false;
+  rtcPresent = true;
+  rtcTimeValid = true;
+  rtcInitTried = true;
+  return true;
+}
+
+static inline bool isMiniGameMode() {
+  return appMode == MODE_MG_WASH || appMode == MODE_MG_PLAY;
+}
+
+static inline bool isModalMode() {
+  return appMode == MODE_MODAL_REPORT || appMode == MODE_RTC_PROMPT || appMode == MODE_RTC_SET || appMode == MODE_MODAL_EVENT || appMode == MODE_SCENE_SELECT;
+}
+
 static inline bool runtimeSleepingFlag() {
   return (state == ST_SLEEP) || (task.active && task.kind == TASK_SLEEP);
+}
+
+static void applySceneConfig(SceneId sceneId, bool keepRelativePosition) {
+  const SceneConfig& cfg = kSceneConfigs[(int)clampi((int)sceneId, 0, (int)SCENE_COUNT - 1)];
+
+  float relativeX = 0.5f;
+  if (worldW > 1.0f) relativeX = clampf(worldX / worldW, 0.0f, 1.0f);
+
+  currentScene = cfg.id;
+  worldW = max((float)SW, cfg.worldScreens * (float)SW);
+  worldMin = 0.0f;
+  worldMax = worldW;
+  homeX = clampf(cfg.homeRatio * worldW, 24.0f, worldW - 24.0f);
+  bushLeftX = clampf(cfg.supplyLeftX, 8.0f, worldW - 80.0f);
+  puddleX = clampf(worldW - cfg.waterRightMargin - (float)sceneWaterPropWidth(), bushLeftX + 72.0f, worldW - 48.0f);
+
+  if (keepRelativePosition) {
+    worldX = clampf(relativeX * worldW, worldMin, worldMax);
+  } else {
+    worldX = homeX;
+  }
+  camX = clampf(worldX - (float)(SW / 2), 0.0f, worldW - (float)SW);
+  uiSpriteDirty = true;
+  uiForceBands = true;
+}
+
+static inline bool canOpenSceneSelect() {
+  return appMode == MODE_PET && phase == PHASE_ALIVE && !task.active && state != ST_SLEEP;
+}
+
+static void switchSceneByOffset(int delta, uint32_t now) {
+  if (!canOpenSceneSelect()) {
+    setMsg("\xe5\xbd\x93\xe5\x89\x8d\xe7\x8a\xb6\xe6\x80\x81\xe6\x97\xa0\xe6\xb3\x95\xe5\x88\x87\xe6\x8d\xa2\xe5\x9c\xba\xe6\x99\xaf", now, 1600);
+    return;
+  }
+
+  int next = ((int)currentScene + delta) % (int)SCENE_COUNT;
+  if (next < 0) next += (int)SCENE_COUNT;
+
+  clearAutoBehavior();
+  applySceneConfig((SceneId)next, false);
+  enterState(ST_SIT, now);
+
+  char tmp[48];
+  snprintf(tmp, sizeof(tmp), "\xe5\xb7\xb2\xe5\x88\x87\xe6\x8d\xa2\xe8\x87\xb3%s", sceneLabel(currentScene));
+  setMsg(tmp, now, 1600);
+  if (saveReady) saveNow(now, "scene");
 }
 
 static void buildOfflineNotice() {
@@ -2258,19 +2655,404 @@ static void buildOfflineNotice() {
 
   if (offlineInfo.skippedNoClock) {
     strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97\xe5\xb7\xb2\xe8\xb7\xb3\xe8\xbf\x87: \xe6\x97\xa0RTC\xe6\x97\xb6\xe9\x97\xb4", sizeof(bootOfflineNotice) - 1);
+  } else if (offlineInfo.skippedInvalidRtc) {
+    strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97\xe5\xb7\xb2\xe8\xb7\xb3\xe8\xbf\x87: RTC\xe6\x97\xb6\xe9\x97\xb4\xe6\x97\xa0\xe6\x95\x88", sizeof(bootOfflineNotice) - 1);
   } else if (offlineInfo.skippedNoSavedTime) {
     strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97\xe5\xbe\x85\xe5\x91\xbd: \xe9\xa6\x96\xe6\xac\xa1\xe8\xae\xb0\xe5\xbd\x95\xe6\x97\xb6\xe9\x97\xb4", sizeof(bootOfflineNotice) - 1);
   } else if (offlineInfo.skippedInvalidDelta) {
     strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97\xe5\xb7\xb2\xe8\xb7\xb3\xe8\xbf\x87: \xe6\x97\xb6\xe9\x97\xb4\xe5\xbc\x82\xe5\xb8\xb8", sizeof(bootOfflineNotice) - 1);
   } else if (offlineInfo.applied) {
-    snprintf(bootOfflineNotice, sizeof(bootOfflineNotice), "\xe7\xa6\xbb\xe7\xba\xbf%lu\xe5\x88\x86\xe5\xb7\xb2\xe7\xbb\x93\xe7\xae\x97%s",
+    char tags[48] = {0};
+    if (offlineInfo.deltaCoin > 0) appendNoticeTag(tags, sizeof(tags), " \xe9\xbe\x99\xe9\x97\xa8\xe5\xb8\x81");
+    if (offlineInfo.sleepingMode) appendNoticeTag(tags, sizeof(tags), " \xe4\xbc\x91\xe6\x95\xb4");
+    if (offlineInfo.stageChanged) appendNoticeTag(tags, sizeof(tags), " \xe6\x88\x90\xe9\x95\xbf");
+    if (offlineInfo.phaseAfter == PHASE_RESTREADY) appendNoticeTag(tags, sizeof(tags), " \xe7\xbb\x93\xe4\xb8\x9a");
+    if (offlineInfo.supplyRespawned || offlineInfo.waterRespawned) appendNoticeTag(tags, sizeof(tags), " \xe8\xa1\xa5\xe7\xbb\x99");
+    if (offlineInfo.endedCritical && !offlineInfo.petDied) appendNoticeTag(tags, sizeof(tags), " \xe8\x99\x9a\xe5\xbc\xb1");
+    if (offlineInfo.petDied) appendNoticeTag(tags, sizeof(tags), " \xe7\xa6\xbb\xe5\xb2\x9b");
+    if (tags[0] == 0) appendNoticeTag(tags, sizeof(tags), " \xe5\xb7\xb2\xe7\xbb\x93\xe7\xae\x97");
+
+    snprintf(bootOfflineNotice, sizeof(bootOfflineNotice), "\xe7\xa6\xbb\xe7\xba\xbf%lu\xe5\x88\x86 \xe9\xbe\x99\xe9\x97\xa8\xe5\xb8\x81%+ld%s%s",
              (unsigned long)offlineInfo.appliedMin,
-             offlineInfo.capped ? "\xe3\x80\x80\xe5\xb7\xb2\xe5\xb0\x81\xe9\xa1\xb6" : "");
+             (long)offlineInfo.deltaCoin,
+             offlineInfo.capped ? " \xe5\xb0\x81\xe9\xa1\xb6" : "",
+             tags);
   } else {
     strncpy(bootOfflineNotice, "\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97: \xe6\x97\xa0\xe9\x9c\x80\xe6\x9b\xb4\xe6\x96\xb0", sizeof(bootOfflineNotice) - 1);
   }
 
   bootOfflineNotice[sizeof(bootOfflineNotice) - 1] = 0;
+}
+
+static void setReportLine(uint8_t idx, const char* text) {
+  if (idx >= 6) return;
+  strncpy(offlineReportModal.lines[idx], text, sizeof(offlineReportModal.lines[idx]) - 1);
+  offlineReportModal.lines[idx][sizeof(offlineReportModal.lines[idx]) - 1] = 0;
+}
+
+static void openOfflineReportModal() {
+  memset(&offlineReportModal, 0, sizeof(offlineReportModal));
+  offlineReportModal.active = true;
+
+  if (offlineInfo.skippedNoClock) {
+    setReportLine(0, "\xe5\x8d\x9a\xe5\xa3\xab\xe7\xa6\xbb\xe5\xb2\x97\xe6\x8a\xa5\xe5\x91\x8a");
+    setReportLine(1, "\xe6\x9c\xaa\xe6\xa3\x80\xe5\x87\xbaRTC\xe6\x97\xb6\xe9\x92\x9f");
+    setReportLine(2, "\xe6\x9c\xac\xe6\xac\xa1\xe5\xb7\xb2\xe8\xb7\xb3\xe8\xbf\x87\xe5\xbe\x85\xe6\x9c\xba\xe7\xbb\x93\xe7\xae\x97");
+    offlineReportModal.lineCount = 3;
+  } else if (offlineInfo.skippedInvalidRtc) {
+    setReportLine(0, "\xe5\x8d\x9a\xe5\xa3\xab\xe7\xa6\xbb\xe5\xb2\x97\xe6\x8a\xa5\xe5\x91\x8a");
+    setReportLine(1, "\xe5\xb7\xb2\xe6\xa3\x80\xe5\x87\xbaRTC\xe6\xa8\xa1\xe5\x9d\x97");
+    setReportLine(2, "\xe4\xbd\x86RTC\xe6\x97\xb6\xe9\x97\xb4\xe6\x97\xa0\xe6\x95\x88");
+    setReportLine(3, "\xe8\xaf\xb7\xe5\x85\x88\xe8\xbf\x9b\xe8\xa1\x8cRTC\xe6\xa0\xa1\xe6\x97\xb6");
+    offlineReportModal.lineCount = 4;
+  } else if (offlineInfo.skippedNoSavedTime) {
+    setReportLine(0, "\xe5\x8d\x9a\xe5\xa3\xab\xe7\xa6\xbb\xe5\xb2\x97\xe6\x8a\xa5\xe5\x91\x8a");
+    setReportLine(1, "\xe9\xa6\x96\xe6\xac\xa1\xe8\xae\xb0\xe5\xbd\x95RTC\xe6\x97\xb6\xe9\x97\xb4");
+    setReportLine(2, "\xe6\x9c\xaa\xe8\xbf\x9b\xe8\xa1\x8c\xe5\x9b\x9e\xe6\xba\xaf\xe7\xbb\x93\xe7\xae\x97");
+    offlineReportModal.lineCount = 3;
+  } else if (offlineInfo.skippedInvalidDelta) {
+    setReportLine(0, "\xe5\x8d\x9a\xe5\xa3\xab\xe7\xa6\xbb\xe5\xb2\x97\xe6\x8a\xa5\xe5\x91\x8a");
+    setReportLine(1, "\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0RTC\xe6\x97\xb6\xe9\x97\xb4\xe5\xbc\x82\xe5\xb8\xb8");
+    setReportLine(2, "\xe6\x9c\xac\xe6\xac\xa1\xe5\xb7\xb2\xe8\xb7\xb3\xe8\xbf\x87\xe7\xbb\x93\xe7\xae\x97");
+    offlineReportModal.lineCount = 3;
+  } else if (offlineInfo.applied) {
+    char line0[48];
+    char line1[48];
+    char line2[48];
+    char line3[48];
+    char line4[48];
+    snprintf(line0, sizeof(line0), "\xe7\xa6\xbb\xe7\xba\xbf:%lum%s%s",
+             (unsigned long)offlineInfo.appliedMin,
+             offlineInfo.sleepingMode ? " \xe4\xbc\x91\xe6\x95\xb4" : "",
+             offlineInfo.capped ? " \xe5\xb0\x81\xe9\xa1\xb6" : "");
+    snprintf(line1, sizeof(line1), "\xe9\xa5\xb1\xe8\x85\xb9%+d \xe6\xb0\xb4\xe5\x88\x86%+d \xe5\x8d\xab\xe7\x94\x9f%+d",
+             offlineInfo.deltaFaim, offlineInfo.deltaSoif, offlineInfo.deltaHygiene);
+    snprintf(line2, sizeof(line2), "\xe5\xbf\x83\xe6\x83\x85%+d \xe7\x96\xb2\xe5\x8a\xb3%+d \xe4\xba\xb2\xe5\xaf\x86%+d",
+             offlineInfo.deltaHumeur, offlineInfo.deltaFatigue, offlineInfo.deltaAmour);
+    snprintf(line3, sizeof(line3), "\xe5\x81\xa5\xe5\xba\xb7%+d \xe9\xbe\x99\xe9\x97\xa8\xe5\xb8\x81%+ld",
+             offlineInfo.deltaSante,
+             (long)offlineInfo.deltaCoin);
+    if (offlineInfo.petDied) {
+      strncpy(line4, "\xe7\xbb\x93\xe6\x9e\x9c:\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe5\xb7\xb2\xe7\xa6\xbb\xe5\xb2\x9b", sizeof(line4) - 1);
+    } else if (offlineInfo.phaseAfter == PHASE_RESTREADY) {
+      strncpy(line4, "\xe7\xbb\x93\xe6\x9e\x9c:\xe6\x88\x90\xe9\x95\xbf\xe8\xae\xb0\xe5\xbd\x95\xe5\xb7\xb2\xe5\xae\x8c\xe6\x88\x90", sizeof(line4) - 1);
+    } else if (offlineInfo.stageChanged) {
+      strncpy(line4, "\xe7\xbb\x93\xe6\x9e\x9c:\xe9\x98\xb6\xe6\xae\xb5\xe5\xb7\xb2\xe6\x9b\xb4\xe6\x96\xb0", sizeof(line4) - 1);
+    } else if (offlineInfo.endedCritical) {
+      strncpy(line4, "\xe7\xbb\x93\xe6\x9e\x9c:\xe5\xbd\x93\xe5\x89\x8d\xe5\xa4\x84\xe4\xba\x8e\xe8\x99\x9a\xe5\xbc\xb1", sizeof(line4) - 1);
+    } else {
+      strncpy(line4, "\xe7\xbb\x93\xe6\x9e\x9c:\xe7\x8a\xb6\xe6\x80\x81\xe5\xb7\xb2\xe5\x90\x8c\xe6\xad\xa5", sizeof(line4) - 1);
+    }
+    if (offlineInfo.supplyRespawned) strncat(line4, " \xe8\xa1\xa5\xe7\xbb\x99\xe5\xb7\xb2\xe5\xa4\x8d\xe4\xbd\x8d", sizeof(line4) - strlen(line4) - 1);
+    if (offlineInfo.waterRespawned) strncat(line4, " \xe9\xa5\xae\xe6\xb0\xb4\xe5\xb7\xb2\xe5\xa4\x8d\xe4\xbd\x8d", sizeof(line4) - strlen(line4) - 1);
+    line4[sizeof(line4) - 1] = 0;
+    setReportLine(0, line0);
+    setReportLine(1, line1);
+    setReportLine(2, line2);
+    setReportLine(3, line3);
+    setReportLine(4, line4);
+    offlineReportModal.lineCount = 5;
+  } else {
+    setReportLine(0, "\xe5\x8d\x9a\xe5\xa3\xab\xe7\xa6\xbb\xe5\xb2\x97\xe6\x8a\xa5\xe5\x91\x8a");
+    setReportLine(1, "\xe6\x9c\xac\xe6\xac\xa1\xe6\x97\xa0\xe9\x9c\x80\xe7\xbb\x93\xe7\xae\x97");
+    offlineReportModal.lineCount = 2;
+  }
+
+  appMode = MODE_MODAL_REPORT;
+  uiForceBands = true;
+  uiSpriteDirty = true;
+}
+static void openRtcPromptModal() {
+  rtcPromptModal.pending = false;
+  rtcPromptModal.sel = 1;
+  appMode = MODE_RTC_PROMPT;
+  uiForceBands = true;
+  uiSpriteDirty = true;
+}
+
+static void openRtcSetModal() {
+  resetRtcDraftFromBuildTime();
+  rtcClampDraft();
+  appMode = MODE_RTC_SET;
+  uiForceBands = true;
+  uiSpriteDirty = true;
+}
+
+static void openDailyEventModal() {
+  if (!hasPendingDailyEventNotice()) return;
+  dailyEventModal.pending = false;
+  dailyEventModal.active = true;
+  appMode = MODE_MODAL_EVENT;
+  uiForceBands = true;
+  uiSpriteDirty = true;
+}
+
+static void openSceneSelectModal(uint32_t now) {
+  if (!canOpenSceneSelect()) {
+    setMsg("\xe5\xbd\x93\xe5\x89\x8d\xe7\x8a\xb6\xe6\x80\x81\xe6\x97\xa0\xe6\xb3\x95\xe5\x88\x87\xe6\x8d\xa2\xe5\x9c\xba\xe6\x99\xaf", now, 1600);
+    return;
+  }
+  clearAutoBehavior();
+  sceneModal.active = true;
+  sceneModal.sel = currentScene;
+  appMode = MODE_SCENE_SELECT;
+  uiForceBands = true;
+  uiSpriteDirty = true;
+}
+
+static void closeModalToPet(uint32_t now) {
+  (void)now;
+  offlineReportModal.active = false;
+  dailyEventModal.active = false;
+  sceneModal.active = false;
+  if (rtcPromptModal.pending) {
+    openRtcPromptModal();
+    return;
+  }
+  if (hasPendingDailyEventNotice()) {
+    openDailyEventModal();
+    return;
+  }
+  appMode = MODE_PET;
+  uiForceBands = true;
+  uiSpriteDirty = true;
+}
+
+static void adjustRtcDraftField(int delta) {
+  rtcClampDraft();
+  switch (rtcDraft.field) {
+    case 0: rtcDraft.year = clampi(rtcDraft.year + delta, 2024, 2099); break;
+    case 1:
+      rtcDraft.month += delta;
+      if (rtcDraft.month < 1) rtcDraft.month = 12;
+      if (rtcDraft.month > 12) rtcDraft.month = 1;
+      break;
+    case 2: {
+      int maxDay = (int)daysInMonth(rtcDraft.year, rtcDraft.month);
+      rtcDraft.day += delta;
+      if (rtcDraft.day < 1) rtcDraft.day = maxDay;
+      if (rtcDraft.day > maxDay) rtcDraft.day = 1;
+      break;
+    }
+    case 3:
+      rtcDraft.hour += delta;
+      if (rtcDraft.hour < 0) rtcDraft.hour = 23;
+      if (rtcDraft.hour > 23) rtcDraft.hour = 0;
+      break;
+    case 4:
+      rtcDraft.minute += delta;
+      if (rtcDraft.minute < 0) rtcDraft.minute = 59;
+      if (rtcDraft.minute > 59) rtcDraft.minute = 0;
+      break;
+    default: break;
+  }
+  rtcClampDraft();
+  uiForceBands = true;
+  uiSpriteDirty = true;
+}
+
+static void modalActionLeft(uint32_t now) {
+  if (appMode == MODE_MODAL_REPORT) {
+    closeModalToPet(now);
+    return;
+  }
+  if (appMode == MODE_MODAL_EVENT) {
+    popDailyEventNotice();
+    if (saveReady) saveNow(now, "event_ack");
+    closeModalToPet(now);
+    return;
+  }
+  if (appMode == MODE_RTC_PROMPT) {
+    rtcPromptModal.sel = 0;
+    uiForceBands = true;
+    uiSpriteDirty = true;
+    return;
+  }
+  if (appMode == MODE_RTC_SET) {
+    adjustRtcDraftField(-1);
+    return;
+  }
+  if (appMode == MODE_SCENE_SELECT) {
+    int s = (int)sceneModal.sel - 1;
+    if (s < 0) s = (int)SCENE_COUNT - 1;
+    sceneModal.sel = (SceneId)s;
+    uiForceBands = true;
+    uiSpriteDirty = true;
+  }
+}
+
+static void modalActionRight(uint32_t now) {
+  if (appMode == MODE_MODAL_REPORT) {
+    closeModalToPet(now);
+    return;
+  }
+  if (appMode == MODE_MODAL_EVENT) {
+    popDailyEventNotice();
+    if (saveReady) saveNow(now, "event_ack");
+    closeModalToPet(now);
+    return;
+  }
+  if (appMode == MODE_RTC_PROMPT) {
+    rtcPromptModal.sel = 1;
+    uiForceBands = true;
+    uiSpriteDirty = true;
+    return;
+  }
+  if (appMode == MODE_RTC_SET) {
+    adjustRtcDraftField(+1);
+    return;
+  }
+  if (appMode == MODE_SCENE_SELECT) {
+    int s = ((int)sceneModal.sel + 1) % (int)SCENE_COUNT;
+    sceneModal.sel = (SceneId)s;
+    uiForceBands = true;
+    uiSpriteDirty = true;
+  }
+}
+
+static void modalActionOk(uint32_t now) {
+  if (appMode == MODE_MODAL_REPORT) {
+    closeModalToPet(now);
+    return;
+  }
+  if (appMode == MODE_MODAL_EVENT) {
+    popDailyEventNotice();
+    if (saveReady) saveNow(now, "event_ack");
+    closeModalToPet(now);
+    return;
+  }
+
+  if (appMode == MODE_RTC_PROMPT) {
+    if (rtcPromptModal.sel == 0) {
+      closeModalToPet(now);
+    } else {
+      openRtcSetModal();
+    }
+    return;
+  }
+
+  if (appMode == MODE_RTC_SET) {
+    if (rtcDraft.field < 4) {
+      rtcDraft.field++;
+      uiForceBands = true;
+      uiSpriteDirty = true;
+      return;
+    }
+
+    if (rtcWriteDraftToChip()) {
+      if (saveReady) saveNow(now, "rtc_set");
+      setMsg("\xe6\x97\xb6\xe9\x92\x9f\xe6\xa0\xa1\xe6\x97\xb6\xe5\xb7\xb2\xe5\xae\x8c\xe6\x88\x90", now, 1800);  // 时钟校时已完成
+      closeModalToPet(now);
+    } else {
+      setMsg("\xe6\x97\xb6\xe9\x92\x9f\xe5\x86\x99\xe5\x85\xa5\xe5\xa4\xb1\xe8\xb4\xa5", now, 1800);  // 时钟写入失败
+      appMode = MODE_PET;
+    }
+    return;
+  }
+
+  if (appMode == MODE_SCENE_SELECT) {
+    char tmp[48];
+    applySceneConfig(sceneModal.sel, false);
+    clearAutoBehavior();
+    enterState(ST_SIT, now);
+    snprintf(tmp, sizeof(tmp), "\xe5\xb7\xb2\xe5\x88\x87\xe6\x8d\xa2\xe8\x87\xb3%s", sceneLabel(currentScene));
+    setMsg(tmp, now, 1600);
+    if (saveReady) saveNow(now, "scene");
+    closeModalToPet(now);
+  }
+}
+
+static void handleModalUI(uint32_t now) {
+  if (!isModalMode()) return;
+
+  if (encoderEnabled()) {
+    int32_t p;
+    noInterrupts(); p = encPos; interrupts();
+    int32_t det = detentFromEnc(p);
+    int32_t dd = det - lastDetent;
+    if (dd < 0) modalActionLeft(now);
+    if (dd > 0) modalActionRight(now);
+    if (dd != 0) lastDetent = det;
+
+    bool raw = readBtnPressedRaw();
+    if (raw != lastBtnRaw) { lastBtnRaw = raw; btnChangeAt = now; }
+    if ((now - btnChangeAt) > BTN_DEBOUNCE_MS) btnState = raw;
+
+    static bool modalLastStable = false;
+    bool pressedEdge = (btnState && !modalLastStable);
+    modalLastStable = btnState;
+    if (pressedEdge) modalActionOk(now);
+  }
+
+  if (buttonsEnabled()) {
+    if (btnLeftEdge) modalActionLeft(now);
+    if (btnRightEdge) modalActionRight(now);
+    if (btnOkEdge) modalActionOk(now);
+  }
+
+  int16_t x = 0, y = 0;
+  bool down = readTouchRaw(x, y);
+  if (down != modalTouch.rawDown) {
+    modalTouch.rawDown = down;
+    modalTouch.lastChange = now;
+    if (down) { modalTouch.x = x; modalTouch.y = y; }
+  } else if (down) {
+    modalTouch.x = x; modalTouch.y = y;
+  }
+
+  bool stableDown = modalTouch.rawDown && (now - modalTouch.lastChange) >= MODAL_TOUCH_DEBOUNCE_MS;
+  bool stableUp   = (!modalTouch.rawDown) && (now - modalTouch.lastChange) >= MODAL_TOUCH_DEBOUNCE_MS;
+  bool pressedEdge = false;
+  if (!modalTouch.stableDown && stableDown) { modalTouch.stableDown = true; pressedEdge = true; }
+  if (modalTouch.stableDown && stableUp) { modalTouch.stableDown = false; }
+  if (!pressedEdge) return;
+
+  x = modalTouch.x;
+  y = modalTouch.y;
+
+  if (appMode == MODE_MODAL_REPORT) {
+    modalActionOk(now);
+    return;
+  }
+  if (appMode == MODE_MODAL_EVENT) {
+    modalActionOk(now);
+    return;
+  }
+
+  if (appMode == MODE_RTC_PROMPT) {
+    if (y >= 96 && y <= 140) {
+      rtcPromptModal.sel = (x < (SW / 2)) ? 0 : 1;
+      uiForceBands = true;
+      uiSpriteDirty = true;
+      return;
+    }
+  }
+
+  if (appMode == MODE_RTC_SET) {
+    if (y >= 74 && y < 74 + 5 * 28) {
+      rtcDraft.field = (uint8_t)clampi((y - 74) / 28, 0, 4);
+      uiForceBands = true;
+      uiSpriteDirty = true;
+      return;
+    }
+  }
+
+  if (appMode == MODE_SCENE_SELECT) {
+    if (y >= 90 && y < 90 + (int)SCENE_COUNT * 28) {
+      sceneModal.sel = (SceneId)clampi((y - 90) / 28, 0, (int)SCENE_COUNT - 1);
+      uiForceBands = true;
+      uiSpriteDirty = true;
+      return;
+    }
+  }
+
+  if (y >= SH - 54) {
+    if (x < SW / 3) modalActionLeft(now);
+    else if (x > (SW * 2) / 3) modalActionRight(now);
+    else modalActionOk(now);
+  } else if (appMode == MODE_RTC_PROMPT) {
+    modalActionOk(now);
+  }
 }
 
 // Init SD hardware (pour SD saves OU futur chargement d'assets)
@@ -2309,15 +3091,416 @@ static void storageInit() {
   Serial.printf("[STORAGE] Save=%s (LittleFS), SD=%s\n",
                 saveReady ? "OK" : "FAIL",
                 sdReady ? "OK" : "non connectee");
+  snprintf(bootStorageNotice, sizeof(bootStorageNotice),
+           saveReady ? "LittleFS check: save ready" : "LittleFS check: init failed");
+  bootStorageNoticeColor = saveReady ? TFT_GREEN : TFT_RED;
 #else
   // Mode classique : tout sur SD
   sdInit();
   saveReady = sdReady;
   Serial.printf("[STORAGE] Save=%s (SD)\n", saveReady ? "OK" : "FAIL");
+  snprintf(bootStorageNotice, sizeof(bootStorageNotice),
+           saveReady ? "SD check: save ready" : "SD check: no card, save off");
+  bootStorageNoticeColor = saveReady ? TFT_GREEN : TFT_RED;
 #endif
+  bootStorageNotice[sizeof(bootStorageNotice) - 1] = 0;
 }
 
-static bool readJsonFile(const char* path, StaticJsonDocument<1024>& doc, uint32_t& outSeq) {
+static fs::FS* runtimeAssetFS() {
+#if USE_LITTLEFS_SAVE
+  if (sdReady) return &SD;
+  if (saveReady) return &saveFS;
+#else
+  if (saveReady) return &saveFS;
+#endif
+  return nullptr;
+}
+
+static RuntimeSingleSpriteCache* runtimeSingleCacheEntry(BeansAssets::AssetId assetId) {
+  for (size_t i = 0; i < (sizeof(runtimeSingleCaches) / sizeof(runtimeSingleCaches[0])); ++i) {
+    if (runtimeSingleCaches[i].assetId == assetId) return &runtimeSingleCaches[i];
+  }
+  return nullptr;
+}
+
+static const RuntimeSingleSpriteCache* runtimeSingleCache(BeansAssets::AssetId assetId) {
+  return runtimeSingleCacheEntry(assetId);
+}
+
+static void resetRuntimeFrameCacheEntry(RuntimeAnimationFrameCacheEntry& entry) {
+  if (entry.pixels) {
+    free(entry.pixels);
+    entry.pixels = nullptr;
+  }
+  if (entry.loaded && runtimeFrameCacheBytes >= entry.bytes) {
+    runtimeFrameCacheBytes -= entry.bytes;
+  }
+  entry.loaded = false;
+  entry.packId[0] = 0;
+  entry.assetId[0] = 0;
+  entry.frameIndex = 0;
+  entry.w = 0;
+  entry.h = 0;
+  entry.key565 = 0;
+  entry.bytes = 0;
+  entry.lastUsed = 0;
+}
+
+static int findRuntimeFrameCacheEntry(const char* packId, const char* assetId, uint16_t frameIndex) {
+  if (!packId || !assetId) return -1;
+  for (int i = 0; i < (int)(sizeof(runtimeFrameCaches) / sizeof(runtimeFrameCaches[0])); ++i) {
+    const RuntimeAnimationFrameCacheEntry& entry = runtimeFrameCaches[i];
+    if (!entry.loaded) continue;
+    if (entry.frameIndex != frameIndex) continue;
+    if (strcmp(entry.packId, packId) != 0) continue;
+    if (strcmp(entry.assetId, assetId) != 0) continue;
+    return i;
+  }
+  return -1;
+}
+
+static int chooseRuntimeFrameCacheVictim() {
+  int victim = -1;
+  uint32_t oldest = 0xFFFFFFFFUL;
+  for (int i = 0; i < (int)(sizeof(runtimeFrameCaches) / sizeof(runtimeFrameCaches[0])); ++i) {
+    if (!runtimeFrameCaches[i].loaded) continue;
+    if (runtimeFrameCaches[i].lastUsed < oldest) {
+      oldest = runtimeFrameCaches[i].lastUsed;
+      victim = i;
+    }
+  }
+  return victim;
+}
+
+static int obtainRuntimeFrameCacheSlot(size_t bytesNeeded) {
+  if (bytesNeeded > RUNTIME_FRAME_CACHE_LIMIT_BYTES) return -1;
+
+  while (runtimeFrameCacheBytes + bytesNeeded > RUNTIME_FRAME_CACHE_LIMIT_BYTES) {
+    int victim = chooseRuntimeFrameCacheVictim();
+    if (victim < 0) return -1;
+    resetRuntimeFrameCacheEntry(runtimeFrameCaches[victim]);
+  }
+
+  for (int i = 0; i < (int)(sizeof(runtimeFrameCaches) / sizeof(runtimeFrameCaches[0])); ++i) {
+    if (!runtimeFrameCaches[i].loaded) return i;
+  }
+
+  int victim = chooseRuntimeFrameCacheVictim();
+  if (victim < 0) return -1;
+  resetRuntimeFrameCacheEntry(runtimeFrameCaches[victim]);
+  return victim;
+}
+
+static void touchRuntimeFrameCacheEntry(RuntimeAnimationFrameCacheEntry& entry) {
+  entry.lastUsed = ++runtimeFrameCacheTick;
+}
+
+static bool loadRuntimeAnimationFrame(const char* packId, const char* assetId, uint16_t frameIndex, RuntimeAnimationFrameView& out) {
+  if (!runtimeAssetsReady || !packId || !assetId) return false;
+
+  int cachedIndex = findRuntimeFrameCacheEntry(packId, assetId, frameIndex);
+  if (cachedIndex >= 0) {
+    RuntimeAnimationFrameCacheEntry& entry = runtimeFrameCaches[cachedIndex];
+    touchRuntimeFrameCacheEntry(entry);
+    out.pixels = entry.pixels;
+    out.w = entry.w;
+    out.h = entry.h;
+    out.key565 = entry.key565;
+    return true;
+  }
+
+  if (!runtimeAssetManager.isPackMounted(packId) && !runtimeAssetManager.mountPack(packId)) {
+    Serial.printf("[ASSET] anim pack mount failed for %s: %s\n", packId, runtimeAssetManager.lastError());
+    return false;
+  }
+
+  BeansAssets::RuntimeFrameRef frame;
+  if (!runtimeAssetManager.getAnimationFrame(assetId, frameIndex, frame)) {
+    Serial.printf("[ASSET] anim metadata failed for %s[%u]: %s\n",
+                  assetId,
+                  (unsigned int)frameIndex,
+                  runtimeAssetManager.lastError());
+    return false;
+  }
+
+  size_t pixelCount = (size_t)frame.width * (size_t)frame.height;
+  size_t bytesNeeded = pixelCount * sizeof(uint16_t);
+  int slot = obtainRuntimeFrameCacheSlot(bytesNeeded);
+  if (slot < 0) {
+    Serial.printf("[ASSET] anim cache full for %s[%u] (%u bytes)\n",
+                  assetId,
+                  (unsigned int)frameIndex,
+                  (unsigned int)bytesNeeded);
+    return false;
+  }
+
+  RuntimeAnimationFrameCacheEntry& entry = runtimeFrameCaches[slot];
+  entry.pixels = (uint16_t*)malloc(bytesNeeded);
+  if (!entry.pixels) {
+    Serial.printf("[ASSET] anim alloc failed for %s[%u] (%u bytes)\n",
+                  assetId,
+                  (unsigned int)frameIndex,
+                  (unsigned int)bytesNeeded);
+    resetRuntimeFrameCacheEntry(entry);
+    return false;
+  }
+
+  if (!runtimeAssetManager.readAnimationFrame(assetId, frameIndex, entry.pixels, pixelCount)) {
+    Serial.printf("[ASSET] anim read failed for %s[%u]: %s\n",
+                  assetId,
+                  (unsigned int)frameIndex,
+                  runtimeAssetManager.lastError());
+    resetRuntimeFrameCacheEntry(entry);
+    return false;
+  }
+
+  strncpy(entry.packId, packId, sizeof(entry.packId) - 1);
+  strncpy(entry.assetId, assetId, sizeof(entry.assetId) - 1);
+  entry.packId[sizeof(entry.packId) - 1] = 0;
+  entry.assetId[sizeof(entry.assetId) - 1] = 0;
+  entry.frameIndex = frameIndex;
+  entry.w = frame.width;
+  entry.h = frame.height;
+  entry.key565 = frame.key565;
+  entry.bytes = bytesNeeded;
+  entry.loaded = true;
+  runtimeFrameCacheBytes += bytesNeeded;
+  touchRuntimeFrameCacheEntry(entry);
+
+  out.pixels = entry.pixels;
+  out.w = entry.w;
+  out.h = entry.h;
+  out.key565 = entry.key565;
+  return true;
+}
+
+static bool ensureRuntimeSingleCached(BeansAssets::AssetId assetId) {
+  RuntimeSingleSpriteCache* cache = runtimeSingleCacheEntry(assetId);
+  if (!cache) return false;
+  if (cache->loaded) return true;
+  if (cache->attempted) return false;
+  cache->attempted = true;
+
+  if (!runtimeAssetsReady) return false;
+  if (!runtimeAssetManager.mountForAsset(assetId)) {
+    Serial.printf("[ASSET] mount failed for %s: %s\n",
+                  BeansAssets::runtimeAssetId(assetId),
+                  runtimeAssetManager.lastError());
+    return false;
+  }
+
+  BeansAssets::RuntimeFrameRef frame;
+  if (!runtimeAssetManager.getSingle(assetId, frame)) {
+    Serial.printf("[ASSET] metadata failed for %s: %s\n",
+                  BeansAssets::runtimeAssetId(assetId),
+                  runtimeAssetManager.lastError());
+    return false;
+  }
+
+  size_t pixelCount = (size_t)frame.width * (size_t)frame.height;
+  cache->pixels = (uint16_t*)malloc(pixelCount * sizeof(uint16_t));
+  if (!cache->pixels) {
+    Serial.printf("[ASSET] alloc failed for %s (%u bytes)\n",
+                  BeansAssets::runtimeAssetId(assetId),
+                  (unsigned int)(pixelCount * sizeof(uint16_t)));
+    return false;
+  }
+
+  if (!runtimeAssetManager.readSingle(assetId, cache->pixels, pixelCount)) {
+    Serial.printf("[ASSET] read failed for %s: %s\n",
+                  BeansAssets::runtimeAssetId(assetId),
+                  runtimeAssetManager.lastError());
+    free(cache->pixels);
+    cache->pixels = nullptr;
+    return false;
+  }
+
+  cache->w = frame.width;
+  cache->h = frame.height;
+  cache->key565 = frame.key565;
+  cache->loaded = true;
+  return true;
+}
+
+static void runtimeAssetsInit() {
+  runtimeAssetsReady = false;
+  for (size_t i = 0; i < (sizeof(runtimeSingleCaches) / sizeof(runtimeSingleCaches[0])); ++i) {
+    if (runtimeSingleCaches[i].pixels) {
+      free(runtimeSingleCaches[i].pixels);
+      runtimeSingleCaches[i].pixels = nullptr;
+    }
+    runtimeSingleCaches[i].attempted = false;
+    runtimeSingleCaches[i].loaded = false;
+    runtimeSingleCaches[i].w = 0;
+    runtimeSingleCaches[i].h = 0;
+    runtimeSingleCaches[i].key565 = 0;
+  }
+  for (size_t i = 0; i < (sizeof(runtimeFrameCaches) / sizeof(runtimeFrameCaches[0])); ++i) {
+    resetRuntimeFrameCacheEntry(runtimeFrameCaches[i]);
+  }
+  runtimeFrameCacheBytes = 0;
+  runtimeFrameCacheTick = 0;
+  fs::FS* fs = runtimeAssetFS();
+  if (!fs) {
+    Serial.println("[ASSET] runtime FS unavailable");
+    return;
+  }
+
+  runtimeAssetManager.begin(*fs, RUNTIME_ASSET_BASE_PATH);
+  runtimeAssetsReady = true;
+
+  if (runtimeAssetManager.mountForAsset(BeansAssets::AssetId::UiScreenTitlePageAccueil)) {
+    Serial.println("[ASSET] runtime title pack OK");
+  } else {
+    Serial.printf("[ASSET] runtime title pack unavailable: %s\n", runtimeAssetManager.lastError());
+  }
+}
+
+static bool drawRuntimeSingleAssetCentered(BeansAssets::AssetId assetId) {
+  if (!ensureRuntimeSingleCached(assetId)) return false;
+  const RuntimeSingleSpriteCache* cache = runtimeSingleCache(assetId);
+  if (!cache || !cache->loaded || !cache->pixels) return false;
+  int x = (SW - (int)cache->w) / 2;
+  int y = (SH - (int)cache->h) / 2;
+  tft.pushImage(x, y, cache->w, cache->h, cache->pixels);
+  return true;
+}
+
+static bool runtimeSingleDimensions(BeansAssets::AssetId assetId, int& w, int& h) {
+  if (!ensureRuntimeSingleCached(assetId)) return false;
+  const RuntimeSingleSpriteCache* cache = runtimeSingleCache(assetId);
+  if (!cache || !cache->loaded) return false;
+  w = (int)cache->w;
+  h = (int)cache->h;
+  return true;
+}
+
+static bool drawRuntimeSingleAssetOnBand(BeansAssets::AssetId assetId, int x, int y, bool flipX=false, uint8_t shade=0) {
+  if (!ensureRuntimeSingleCached(assetId)) return false;
+  const RuntimeSingleSpriteCache* cache = runtimeSingleCache(assetId);
+  if (!cache || !cache->loaded || !cache->pixels) return false;
+  drawImageKeyedOnBandRAM(cache->pixels, cache->key565, cache->w, cache->h, x, y, flipX, shade);
+  return true;
+}
+
+static bool drawRuntimeAnimationFrameOnBand(const char* packId, const char* assetId, uint16_t frameIndex, int x, int y, int& w, int& h, bool flipX=false, uint8_t shade=0) {
+  RuntimeAnimationFrameView view;
+  if (!loadRuntimeAnimationFrame(packId, assetId, frameIndex, view)) return false;
+  w = (int)view.w;
+  h = (int)view.h;
+  drawImageKeyedOnBandRAM(view.pixels, view.key565, view.w, view.h, x, y, flipX, shade);
+  return true;
+}
+
+static void trimAscii(char* s) {
+  if (!s) return;
+  char* start = s;
+  while (*start && isspace((unsigned char)*start)) start++;
+  if (start != s) memmove(s, start, strlen(start) + 1);
+
+  size_t len = strlen(s);
+  while (len > 0 && isspace((unsigned char)s[len - 1])) {
+    s[len - 1] = 0;
+    len--;
+  }
+
+  if (len >= 2 && s[0] == '"' && s[len - 1] == '"') {
+    memmove(s, s + 1, len - 2);
+    s[len - 2] = 0;
+  }
+}
+
+static void resetAutoBehaviorTable() {
+  memset(autoBehaviorDefs, 0, sizeof(autoBehaviorDefs));
+  autoBehaviorCount = 0;
+  autoBehaviorTableReady = false;
+  autoBehaviorLoadNote[0] = 0;
+}
+
+static bool appendAutoBehaviorDef(const AutoBehaviorDef& src) {
+  if (autoBehaviorCount >= AUTO_BEHAVIOR_MAX) return false;
+  autoBehaviorDefs[autoBehaviorCount++] = src;
+  return true;
+}
+
+static void resetDailyEventTable() {
+  memset(dailyEventDefs, 0, sizeof(dailyEventDefs));
+  dailyEventCount = 0;
+  dailyEventTableReady = false;
+}
+
+static bool appendDailyEventDef(const DailyEventDef& src) {
+  if (dailyEventCount >= DAILY_EVENT_MAX) return false;
+  dailyEventDefs[dailyEventCount++] = src;
+  return true;
+}
+
+static void initDailyEventTable() {
+  resetDailyEventTable();
+
+  for (uint8_t i = 0; i < kDailyEventTableCNCount && dailyEventCount < DAILY_EVENT_MAX; ++i) {
+    const DailyEventConfigEntry& src = kDailyEventTableCN[i];
+    if (!src.enabled || !src.eventName || !src.eventName[0]) continue;
+
+    DailyEventDef def;
+    memset(&def, 0, sizeof(def));
+    def.enabled = true;
+    def.weight = (uint16_t)iClamp((int)src.weight, 1, 1000);
+    def.art = (src.art == AUTO_ART_AUTO) ? AUTO_ART_ASSIE : src.art;
+    def.deltaFaim = (int8_t)clampi((int)src.deltaFaim, -100, 100);
+    def.deltaSoif = (int8_t)clampi((int)src.deltaSoif, -100, 100);
+    def.deltaFatigue = (int8_t)clampi((int)src.deltaFatigue, -100, 100);
+    def.deltaHygiene = (int8_t)clampi((int)src.deltaHygiene, -100, 100);
+    def.deltaHumeur = (int8_t)clampi((int)src.deltaHumeur, -100, 100);
+    def.deltaAmour = (int8_t)clampi((int)src.deltaAmour, -100, 100);
+    def.deltaSante = (int8_t)clampi((int)src.deltaSante, -100, 100);
+    strncpy(def.eventName, src.eventName, sizeof(def.eventName) - 1);
+    strncpy(def.summary, (src.summary && src.summary[0]) ? src.summary : src.eventName, sizeof(def.summary) - 1);
+    trimAscii(def.eventName);
+    trimAscii(def.summary);
+    if (def.eventName[0] == 0) continue;
+    appendDailyEventDef(def);
+  }
+
+  dailyEventTableReady = dailyEventCount > 0;
+  Serial.printf("[EVENT] daily table %s, count=%u\n",
+                dailyEventTableReady ? "ready" : "empty",
+                (unsigned)dailyEventCount);
+}
+
+static void initAutoBehaviorTable() {
+  resetAutoBehaviorTable();
+
+  for (uint8_t i = 0; i < kAutoBehaviorTableCNCount && autoBehaviorCount < AUTO_BEHAVIOR_MAX; ++i) {
+    const AutoBehaviorConfigEntry& src = kAutoBehaviorTableCN[i];
+    if (!src.enabled || !src.behavior || !src.behavior[0]) continue;
+
+    AutoBehaviorDef def;
+    memset(&def, 0, sizeof(def));
+    def.enabled = true;
+    def.weight = (uint16_t)iClamp((int)src.weight, 1, 1000);
+    def.moveMode = src.moveMode;
+    def.art = src.art;
+    def.minMs = (uint16_t)iClamp((int)src.minMs, 300, 60000);
+    def.maxMs = (uint16_t)iClamp((int)src.maxMs, (int)def.minMs, 60000);
+    strncpy(def.behavior, src.behavior, sizeof(def.behavior) - 1);
+    strncpy(def.bubble, src.bubbleText ? src.bubbleText : "", sizeof(def.bubble) - 1);
+    trimAscii(def.behavior);
+    trimAscii(def.bubble);
+    if (def.behavior[0] == 0) continue;
+    appendAutoBehaviorDef(def);
+  }
+
+  autoBehaviorTableReady = autoBehaviorCount > 0;
+  snprintf(autoBehaviorLoadNote, sizeof(autoBehaviorLoadNote),
+           autoBehaviorTableReady ? "Behavior table loaded:%u" : "Behavior table empty",
+           autoBehaviorCount);
+  Serial.printf("[AUTO] behavior table %s, count=%u\n",
+                autoBehaviorTableReady ? "ready" : "fallback-empty",
+                (unsigned)autoBehaviorCount);
+}
+
+static bool readJsonFile(const char* path, StaticJsonDocument<4096>& doc, uint32_t& outSeq) {
   outSeq = 0;
   if (!saveReady) return false;
   if (!saveFS.exists(path)) return false;
@@ -2375,6 +3558,7 @@ static void applyLoadedToRuntime(uint32_t now) {
   appMode = MODE_PET;
   mg.active = false;
   mg.kind = TASK_NONE;
+  clearAutoBehavior();
 
   uiSpriteDirty = true;
   uiForceBands  = true;
@@ -2383,14 +3567,16 @@ static void applyLoadedToRuntime(uint32_t now) {
 static bool loadLatestSave(uint32_t now) {
   if (!saveReady) return false;
 
-  StaticJsonDocument<1024> dA, dB;
+  static StaticJsonDocument<4096> dA, dB;
+  dA.clear();
+  dB.clear();
   uint32_t sA=0, sB=0;
   bool okA = readJsonFile(SAVE_A, dA, sA);
   bool okB = readJsonFile(SAVE_B, dB, sB);
 
   if (!okA && !okB) return false;
 
-  StaticJsonDocument<1024>* bestDoc = nullptr;
+  StaticJsonDocument<4096>* bestDoc = nullptr;
   bool bestIsA = true;
 
   if (okA && (!okB || sA >= sB)) { bestDoc = &dA; bestIsA = true; }
@@ -2410,10 +3596,39 @@ static bool loadLatestSave(uint32_t now) {
 
   pet.ageMin = doc["ageMin"] | 0UL;
   pet.evolveProgressMin = doc["evolveProgressMin"] | 0UL;
+  pet.lungmenCoin = doc["lungmenCoin"] | 0UL;
+  currentScene = (SceneId)clampi(doc["sceneId"] | (int)SCENE_DORM, 0, (int)SCENE_COUNT - 1);
+  applySceneConfig(currentScene, false);
   pet.vivant = doc["vivant"] | true;
   savedTimeValid = doc["timeValid"] | false;
   savedLastUnixTime = doc["lastUnixTime"] | 0UL;
   savedWasSleeping = doc["lastSleeping"] | false;
+  lastDailyEventDay = doc["dailyLastDay"] | 0UL;
+  clearDailyEventQueue();
+  JsonArray pendingEvents = doc["dailyPending"].as<JsonArray>();
+  if (!pendingEvents.isNull()) {
+    for (JsonObject item : pendingEvents) {
+      if (dailyEventQueueCount >= DAILY_EVENT_QUEUE_MAX) break;
+      DailyEventNotice notice;
+      memset(&notice, 0, sizeof(notice));
+      notice.valid = true;
+      notice.offline = item["offline"] | false;
+      notice.dayIndex = item["day"] | 0UL;
+      notice.art = (AutoBehaviorArt)clampi(item["art"] | (int)AUTO_ART_ASSIE, (int)AUTO_ART_AUTO, (int)AUTO_ART_MANGE);
+      const char* nm = item["name"] | "";
+      const char* sm = item["summary"] | "";
+      strncpy(notice.eventName, nm, sizeof(notice.eventName) - 1);
+      strncpy(notice.summary, sm, sizeof(notice.summary) - 1);
+      notice.deltaFaim = (int8_t)clampi(item["dfaim"] | 0, -100, 100);
+      notice.deltaSoif = (int8_t)clampi(item["dsoif"] | 0, -100, 100);
+      notice.deltaFatigue = (int8_t)clampi(item["dfatigue"] | 0, -100, 100);
+      notice.deltaHygiene = (int8_t)clampi(item["dhygiene"] | 0, -100, 100);
+      notice.deltaHumeur = (int8_t)clampi(item["dhumeur"] | 0, -100, 100);
+      notice.deltaAmour = (int8_t)clampi(item["damour"] | 0, -100, 100);
+      notice.deltaSante = (int8_t)clampi(item["dsante"] | 0, -100, 100);
+      enqueueDailyEventNotice(notice);
+    }
+  }
 
   const char* nm = doc["name"] | "???";
   strncpy(petName, nm, sizeof(petName)-1);
@@ -2450,20 +3665,24 @@ static bool loadLatestSave(uint32_t now) {
 }
 
 static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char* why, bool timeValid, uint32_t unixTime) {
-  StaticJsonDocument<1024> doc;
+  static StaticJsonDocument<4096> doc;
+  doc.clear();
   doc["ver"] = 2;
   doc["seq"] = saveSeq;
   doc["why"] = why;
 
   doc["phase"] = (int)phase;
   doc["stage"] = (int)pet.stage;
+  doc["sceneId"] = (int)currentScene;
   doc["ageMin"] = (uint32_t)pet.ageMin;
   doc["evolveProgressMin"] = (uint32_t)pet.evolveProgressMin;
+  doc["lungmenCoin"] = (uint32_t)pet.lungmenCoin;
   doc["vivant"] = pet.vivant;
   doc["name"] = petName;
   doc["timeValid"] = timeValid;
   doc["lastUnixTime"] = timeValid ? unixTime : 0UL;
   doc["lastSleeping"] = runtimeSleepingFlag();
+  doc["dailyLastDay"] = lastDailyEventDay;
 
 #if ENABLE_AUDIO
   doc["audioMode"] = (int)audioMode;
@@ -2478,6 +3697,25 @@ static bool writeSlotFile(const char* tmpPath, const char* finalPath, const char
   ps["fatigue"] = fToI100(pet.fatigue);
   ps["amour"]   = fToI100(pet.amour);
   ps["sante"]   = fToI100(pet.sante);
+
+  JsonArray pendingEvents = doc.createNestedArray("dailyPending");
+  for (uint8_t i = 0; i < dailyEventQueueCount; ++i) {
+    const DailyEventNotice& notice = dailyEventQueue[i];
+    if (!notice.valid) continue;
+    JsonObject item = pendingEvents.createNestedObject();
+    item["offline"] = notice.offline;
+    item["day"] = notice.dayIndex;
+    item["art"] = (int)notice.art;
+    item["name"] = notice.eventName;
+    item["summary"] = notice.summary;
+    item["dfaim"] = notice.deltaFaim;
+    item["dsoif"] = notice.deltaSoif;
+    item["dfatigue"] = notice.deltaFatigue;
+    item["dhygiene"] = notice.deltaHygiene;
+    item["dhumeur"] = notice.deltaHumeur;
+    item["damour"] = notice.deltaAmour;
+    item["dsante"] = notice.deltaSante;
+  }
 
   if (saveFS.exists(tmpPath)) saveFS.remove(tmpPath);
   File f = saveFS.open(tmpPath, FILE_WRITE);
@@ -2625,9 +3863,11 @@ if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
   // IMPORTANT: on sort ici sinon le code plus bas ré-affiche autre chose
 
   } else {
-    snprintf(line, sizeof(line), "\xe6\xa1\xa3\xe6\xa1\x88\xe9\xbe\x84:%lum  %s",
+    snprintf(line, sizeof(line), "\xe6\xa1\xa3\xe9\xbe\x84:%lum %s %s \xe5\xb8\x81:%lu",
              (unsigned long)pet.ageMin,
-             stageLabel(pet.stage));
+             stageLabel(pet.stage),
+             sceneLabel(currentScene),
+             (unsigned long)pet.lungmenCoin);
     showStatusLine = true;
   }
 #endif
@@ -2699,9 +3939,11 @@ if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
     uiTop.setCursor(6, 53); uiTop.print(l4);
     resetFont(uiTop);
   } else {
-    snprintf(line, sizeof(line), "\xe6\xa1\xa3\xe6\xa1\x88\xe9\xbe\x84:%lum  %s",
+    snprintf(line, sizeof(line), "\xe6\xa1\xa3\xe9\xbe\x84:%lum %s %s \xe5\xb8\x81:%lu",
              (unsigned long)pet.ageMin,
-             stageLabel(pet.stage));
+             stageLabel(pet.stage),
+             sceneLabel(currentScene),
+             (unsigned long)pet.lungmenCoin);
     showStatusLine = true;
   }
 
@@ -2818,21 +4060,45 @@ const int TOP_BTN_PAD = 8;
   uiBot.setTextDatum(middle_center);
 
   const uint8_t nbtn = uiButtonCount();
+  const int r = 8;
+  int GAP = 0;
+  int yy = 0;
+  int bw = 0;
+  int bh = 0;
+  int startX = 0;
+  calcBottomActionLayout(nbtn, startX, bw, bh, yy, GAP);
 // --- Layout barre du bas (centrée, largeur fixe) ---
-const int GAP = 6;     // espace entre boutons
-const int yy  = 8;     // <-- plus grand => boutons moins hauts
-const int r   = 8;
-
-int bw = uiButtonWidth(nbtn);
-int bh = UI_BOT_H - (yy * 2);
-
-int totalW = (int)nbtn * bw + ((int)nbtn - 1) * GAP;
-int startX = (SW - totalW) / 2;
-
-
-
-
   bool hardBusy = (phase == PHASE_HATCHING || phase == PHASE_TOMB);
+  bool canSceneSwitch = canOpenSceneSelect();
+
+  if (uiShowSceneArrows()) {
+    auto drawSceneArrow = [&](int x, bool toRight, bool selected) {
+      uint16_t baseCol = 0x03FF;
+      uint16_t fill = selected ? baseCol : TFT_WHITE;
+      uint16_t fg = selected ? TFT_WHITE : TFT_BLACK;
+      uint16_t border = canSceneSwitch ? baseCol : 0x7BEF;
+      if (!canSceneSwitch) {
+        fill = selected ? 0x9CF3 : 0xDEFB;
+        fg = TFT_BLACK;
+      }
+
+      uiBot.fillRoundRect(x, yy, uiSceneArrowW(), bh, r, fill);
+      uiBot.drawRoundRect(x, yy, uiSceneArrowW(), bh, r, border);
+      if (selected) {
+        uiBot.drawRoundRect(x + 2, yy + 2, uiSceneArrowW() - 4, bh - 4, max(1, r - 2), TFT_WHITE);
+      }
+
+      const int cx = x + uiSceneArrowW() / 2;
+      const int cy = yy + bh / 2;
+      const int triHalfH = max(4, bh / 4);
+      const int triHalfW = max(3, uiSceneArrowW() / 3);
+      if (toRight) uiBot.fillTriangle(cx - triHalfW, cy - triHalfH, cx - triHalfW, cy + triHalfH, cx + triHalfW, cy, fg);
+      else         uiBot.fillTriangle(cx + triHalfW, cy - triHalfH, cx + triHalfW, cy + triHalfH, cx - triHalfW, cy, fg);
+    };
+
+    drawSceneArrow(uiSceneArrowLeftX(), false, uiSel == 0);
+    drawSceneArrow(uiSceneArrowRightX(), true, uiSel == (uint8_t)(nbtn - 1));
+  }
 
   for (int i = 0; i < (int)nbtn; i++) {
     int xx = startX + i*(bw + GAP);
@@ -2897,6 +4163,123 @@ int startX = (SW - totalW) / 2;
   }
 }
 
+static void drawModalTextBand(int bandY, int x, int y, const char* text, uint16_t fg, uint16_t bg) {
+  if (!text || text[0] == 0) return;
+  if (y < bandY - 18 || y > bandY + BAND_H) return;
+  setCNFont(band);
+  band.setTextColor(fg, bg);
+  band.setTextDatum(top_left);
+  band.drawString(text, x, y - bandY);
+  resetFont(band);
+}
+
+static void drawModalOverlayBand(int bandY, int bh) {
+  if (!isModalMode()) return;
+
+  band.fillRect(0, 0, SW, bh, 0x2104);
+
+  const int boxX = 12;
+  const int boxY = 18;
+  const int boxW = SW - 24;
+  const int boxH = SH - 36;
+  const int localBoxY = boxY - bandY;
+
+  band.fillRect(boxX, localBoxY, boxW, boxH, 0xFFFF);
+  band.drawRect(boxX, localBoxY, boxW, boxH, TFT_BLACK);
+  band.drawFastHLine(boxX, localBoxY + 30, boxW, 0x7BEF);
+
+  if (appMode == MODE_MODAL_REPORT) {
+    drawModalTextBand(bandY, boxX + 12, boxY + 8, "\xe5\x8d\x9a\xe5\xa3\xab\xe7\xa6\xbb\xe5\xb2\x97\xe6\x8a\xa5\xe5\x91\x8a", TFT_BLACK, 0xFFFF);
+    for (uint8_t i = 0; i < offlineReportModal.lineCount; ++i) {
+      drawModalTextBand(bandY, boxX + 12, boxY + 44 + i * 24, offlineReportModal.lines[i], TFT_BLACK, 0xFFFF);
+    }
+    drawModalTextBand(bandY, boxX + 12, boxY + boxH - 34, "\xe4\xb8\xad\xe9\x97\xb4OK\xe5\x85\xb3\xe9\x97\xad", 0x39C7, 0xFFFF);
+  } else if (appMode == MODE_MODAL_EVENT) {
+    const DailyEventNotice* notice = currentDailyEventNotice();
+    char line1[56];
+    char line2[56];
+    char line3[56];
+    if (notice) {
+      drawModalTextBand(bandY, boxX + 12, boxY + 8, notice->offline ? "\xe7\xa6\xbb\xe5\xb2\x97\xe4\xba\x8b\xe4\xbb\xb6\xe5\x9b\x9e\xe6\x8a\xa5" : "\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe5\xbd\x93\xe6\x97\xa5\xe4\xba\x8b\xe4\xbb\xb6", TFT_BLACK, 0xFFFF);
+      drawModalTextBand(bandY, boxX + 12, boxY + 44, notice->eventName, TFT_BLACK, 0xFFFF);
+      drawModalTextBand(bandY, boxX + 12, boxY + 68, notice->summary, TFT_BLACK, 0xFFFF);
+      snprintf(line1, sizeof(line1), "\xe9\xa5\xb1\xe8\x85\xb9%+d \xe6\xb0\xb4\xe5\x88\x86%+d \xe7\x96\xb2\xe5\x8a\xb3%+d", notice->deltaFaim, notice->deltaSoif, notice->deltaFatigue);
+      snprintf(line2, sizeof(line2), "\xe5\x8d\xab\xe7\x94\x9f%+d \xe5\xbf\x83\xe6\x83\x85%+d \xe4\xba\xb2\xe5\xaf\x86%+d", notice->deltaHygiene, notice->deltaHumeur, notice->deltaAmour);
+      snprintf(line3, sizeof(line3), "\xe5\x81\xa5\xe5\xba\xb7%+d", notice->deltaSante);
+      drawModalTextBand(bandY, boxX + 12, boxY + 98, line1, TFT_BLACK, 0xFFFF);
+      drawModalTextBand(bandY, boxX + 12, boxY + 122, line2, TFT_BLACK, 0xFFFF);
+      drawModalTextBand(bandY, boxX + 12, boxY + 146, line3, TFT_BLACK, 0xFFFF);
+
+      if (phase == PHASE_ALIVE) {
+        uint8_t animId = autoBehaviorAnimIdForStage(pet.stage, notice->art);
+        uint8_t cnt = triAnimCount(pet.stage, animId);
+        if (cnt == 0) cnt = 1;
+        const uint16_t* frame = triGetFrame(pet.stage, animId, animIdx % cnt);
+        int dw = triW(pet.stage);
+        int dh = triH(pet.stage);
+        int px = boxX + boxW - dw - 8;
+        int py = boxY + 42 - bandY;
+        band.fillRect(px - 4, py - 4, dw + 8, dh + 8, 0xE71C);
+        band.drawRect(px - 4, py - 4, dw + 8, dh + 8, 0xC618);
+        drawImageKeyedOnBand(frame, dw, dh, px, py, false, 0);
+      }
+    }
+    drawModalTextBand(bandY, boxX + 12, boxY + boxH - 34, "\xe4\xb8\xad\xe9\x97\xb4OK\xe7\xbb\xa7\xe7\xbb\xad", 0x39C7, 0xFFFF);
+  } else if (appMode == MODE_RTC_PROMPT) {
+    drawModalTextBand(bandY, boxX + 12, boxY + 8, "RTC \xe6\x9c\xaa\xe6\xa0\xa1\xe6\x97\xb6", TFT_BLACK, 0xFFFF);
+    drawModalTextBand(bandY, boxX + 12, boxY + 46, "\xe6\xa3\x80\xe6\xb5\x8b\xe5\x88\xb0RTC\xe4\xbd\x86\xe6\x97\xb6\xe9\x97\xb4\xe6\x97\xa0\xe6\x95\x88", TFT_BLACK, 0xFFFF);
+    drawModalTextBand(bandY, boxX + 12, boxY + 70, "\xe5\xbb\xba\xe8\xae\xae\xe5\x85\x88\xe6\xa0\xa1\xe6\x97\xb6\xe5\x86\x8d\xe5\x90\xaf\xe7\x94\xa8\xe7\xa6\xbb\xe7\xba\xbf\xe7\xbb\x93\xe7\xae\x97", TFT_BLACK, 0xFFFF);
+
+    uint16_t leftBg = (rtcPromptModal.sel == 0) ? 0xFD20 : 0xDEFB;
+    uint16_t rightBg = (rtcPromptModal.sel == 1) ? 0x07E0 : 0xDEFB;
+    band.fillRoundRect(boxX + 14, boxY + 106 - bandY, 78, 28, 6, leftBg);
+    band.drawRoundRect(boxX + 14, boxY + 106 - bandY, 78, 28, 6, TFT_BLACK);
+    band.fillRoundRect(boxX + boxW - 92, boxY + 106 - bandY, 78, 28, 6, rightBg);
+    band.drawRoundRect(boxX + boxW - 92, boxY + 106 - bandY, 78, 28, 6, TFT_BLACK);
+    drawModalTextBand(bandY, boxX + 34, boxY + 113, "\xe8\xb7\xb3\xe8\xbf\x87", TFT_BLACK, leftBg);
+    drawModalTextBand(bandY, boxX + boxW - 72, boxY + 113, "\xe6\xa0\xa1\xe6\x97\xb6", TFT_BLACK, rightBg);
+    drawModalTextBand(bandY, boxX + 12, boxY + boxH - 34, "\xe5\xb7\xa6\xe5\x8f\xb3\xe9\x80\x89\xe6\x8b\xa9  \xe4\xb8\xad\xe9\x97\xb4OK\xe7\xa1\xae\xe8\xae\xa4", 0x39C7, 0xFFFF);
+  } else if (appMode == MODE_RTC_SET) {
+    char line[48];
+    drawModalTextBand(bandY, boxX + 12, boxY + 8, "RTC \xe6\xa0\xa1\xe6\x97\xb6", TFT_BLACK, 0xFFFF);
+    static const char* labels[5] = {
+      "\xe5\xb9\xb4", "\xe6\x9c\x88", "\xe6\x97\xa5", "\xe6\x97\xb6", "\xe5\x88\x86"
+    };
+    int values[5] = { rtcDraft.year, rtcDraft.month, rtcDraft.day, rtcDraft.hour, rtcDraft.minute };
+    for (int i = 0; i < 5; ++i) {
+      int rowY = boxY + 44 + i * 28;
+      uint16_t rowBg = (rtcDraft.field == i) ? 0xC7F9 : 0xFFFF;
+      band.fillRect(boxX + 10, rowY - bandY, boxW - 20, 22, rowBg);
+      snprintf(line, sizeof(line), "%s: %02d", labels[i], values[i]);
+      if (i == 0) snprintf(line, sizeof(line), "%s: %04d", labels[i], values[i]);
+      drawModalTextBand(bandY, boxX + 18, rowY + 2, line, TFT_BLACK, rowBg);
+    }
+    drawModalTextBand(bandY, boxX + 12, boxY + boxH - 34, "\xe5\xb7\xa6\xe5\x87\x8f \xe5\x8f\xb3\xe5\x8a\xa0 \xe4\xb8\xad\xe9\x97\xb4OK\xe4\xb8\x8b\xe4\xb8\x80\xe9\xa1\xb9/\xe4\xbf\x9d\xe5\xad\x98", 0x39C7, 0xFFFF);
+  } else if (appMode == MODE_SCENE_SELECT) {
+    drawModalTextBand(bandY, boxX + 12, boxY + 8, "\xe5\x9c\xba\xe6\x99\xaf\xe5\x88\x87\xe6\x8d\xa2", TFT_BLACK, 0xFFFF);
+    drawModalTextBand(bandY, boxX + 12, boxY + 40, "\xe9\x80\x89\xe6\x8b\xa9\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe5\xbd\x93\xe5\x89\x8d\xe6\x89\x80\xe5\x9c\xa8\xe5\x9c\xba\xe6\x99\xaf", TFT_BLACK, 0xFFFF);
+    for (int i = 0; i < (int)SCENE_COUNT; ++i) {
+      int rowY = boxY + 72 + i * 28;
+      uint16_t rowBg = (sceneModal.sel == (SceneId)i) ? 0xC7F9 : 0xFFFF;
+      band.fillRect(boxX + 10, rowY - bandY, boxW - 20, 22, rowBg);
+      drawModalTextBand(bandY, boxX + 18, rowY + 2, sceneLabel((SceneId)i), TFT_BLACK, rowBg);
+    }
+    drawModalTextBand(bandY, boxX + 12, boxY + boxH - 34, "\xe5\xb7\xa6\xe5\x8f\xb3\xe5\x88\x87\xe6\x8d\xa2 \xe4\xb8\xad\xe9\x97\xb4OK\xe7\xa1\xae\xe8\xae\xa4", 0x39C7, 0xFFFF);
+  }
+  const int btnY = SH - 48;
+  const int btnH = 34;
+  const int btnW = (SW - 36) / 3;
+  for (int i = 0; i < 3; ++i) {
+    int bx = 9 + i * (btnW + 9);
+    uint16_t fill = (i == 1) ? 0xC7F9 : 0xDEFB;
+    band.fillRoundRect(bx, btnY - bandY, btnW, btnH, 6, fill);
+    band.drawRoundRect(bx, btnY - bandY, btnW, btnH, 6, TFT_BLACK);
+  }
+  drawModalTextBand(bandY, 24, btnY + 8, "\xe5\xb7\xa6", TFT_BLACK, 0xDEFB);      // 左
+  drawModalTextBand(bandY, SW / 2 - 12, btnY + 8, "OK", TFT_BLACK, 0xC7F9);
+  drawModalTextBand(bandY, SW - 34, btnY + 8, "\xe5\x8f\xb3", TFT_BLACK, 0xDEFB);  // 右
+}
+
 // ================== Overlay UI into band ==================
 static inline void overlayKeyedSpriteIntoBand(int dstYInBand, const uint16_t* src, int srcW, int srcH, int srcY0, int copyH) {
   uint16_t* dst = (uint16_t*)band.getBuffer();
@@ -2937,12 +4320,16 @@ static void overlayUIIntoBand(int bandY, int bh) {
     int dstY = b0 - bandY;
     overlayKeyedSpriteIntoBand(dstY, (uint16_t*)uiBot.getBuffer(), SW, UI_BOT_H, srcY, h);
   }
+
+  drawModalOverlayBand(bandY, bh);
 }
 
 // ================== DECOR ==================
 static void drawMountainImagesBand(float camX, int bandY) {
-  const int w = (int)MONT_W;
-  const int h = (int)MONT_H;
+  if (!currentSceneConfig().showMountains) return;
+  int w = (int)MONT_W;
+  int h = (int)MONT_H;
+  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropMountain, w, h);
   const int yOnGround = GROUND_Y - h;
 
   float px = camX * 0.25f;
@@ -2957,23 +4344,108 @@ static void drawMountainImagesBand(float camX, int bandY) {
     int x = i * spacing - (int)px + jitter;
     int yLocal = yOnGround - bandY;
     if (yLocal >= band.height() || yLocal + h <= 0) continue;
-    drawImageKeyedOnBand(MONT_IMG, w, h, x, yLocal);
+    if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropMountain, x, yLocal)) {
+      drawImageKeyedOnBand(MONT_IMG, w, h, x, yLocal);
+    }
   }
 }
-static void drawGroundBand(float camX, int bandY) {
-  int gy = GROUND_Y - bandY;
-  band.fillRect(0, gy, SW, SH - GROUND_Y, C_GROUND);
-  for (int y = gy; y < band.height(); y += 8) {
-    if (y >= 0) band.drawFastHLine(0, y, SW, C_GLINE);
+
+static void drawSceneCloudsBand(float camX, int bandY) {
+  if (!currentSceneConfig().showClouds) return;
+  int w = (int)NUAGE_W;
+  int h = (int)NUAGE_H;
+  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropCloud, w, h);
+  float px = camX * 0.18f;
+  const int spacing = 96;
+  int first = (int)floor((px - SW) / spacing) - 2;
+  int last  = (int)floor((px + 2 * SW) / spacing) + 2;
+  for (int i = first; i <= last; ++i) {
+    int x = i * spacing - (int)px + (int)(hash32(i * 471) % 20) - 10;
+    int yOnSky = 10 + (int)(hash32(i * 613) % 28);
+    int yLocal = yOnSky - bandY;
+    if (yLocal >= band.height() || yLocal + h <= 0) continue;
+    if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropCloud, x, yLocal, false, 0)) {
+      drawImageKeyedOnBand(NUAGE_IMG, w, h, x, yLocal, false, 0);
+    }
   }
-  int shift = (int)camX;
-  for (int x = -40; x < SW + 40; x += 32) {
-    int xx = x - imod(shift, 32);
-    int yy = (GROUND_Y + 18 + (imod(x + shift, 64) / 8)) - bandY;
-    band.fillRect(xx, yy, 10, 3, C_GROUND2);
+}
+
+static void drawSceneBackdropBand(float camX, int bandY) {
+  const SceneConfig& cfg = currentSceneConfig();
+  if (!cfg.indoor) {
+    if (currentScene == SCENE_DECK) {
+      int railY = GROUND_Y - 24 - bandY;
+      if (railY >= -8 && railY <= band.height()) {
+        band.fillRect(0, railY, SW, 5, cfg.accentB);
+        for (int x = -16; x < SW + 24; x += 26) {
+          band.fillRect(x - imod((int)camX, 26), railY + 5, 4, 18, cfg.accentA);
+        }
+      }
+    }
+    return;
+  }
+
+  band.fillRect(0, 0, SW, max(0, GROUND_Y - bandY), cfg.skyColor);
+  int panelTop = 16 - bandY;
+  for (int x = -20; x < SW + 40; x += 54) {
+    int px = x - imod((int)(camX * 0.35f), 54);
+    if (panelTop < band.height() && panelTop + 48 > 0) {
+      band.drawRect(px, panelTop, 40, 44, cfg.accentB);
+      band.drawFastVLine(px + 20, panelTop + 4, 36, cfg.accentB);
+    }
+  }
+
+  if (currentScene == SCENE_DORM) {
+    int bedY = GROUND_Y - 34 - bandY;
+    int bedX = SW - 90 - imod((int)(camX * 0.55f), 42);
+    if (bedY < band.height() && bedY + 26 > 0) {
+      band.fillRoundRect(bedX, bedY, 62, 18, 4, cfg.accentA);
+      band.drawRoundRect(bedX, bedY, 62, 18, 4, cfg.accentC);
+      band.fillRect(bedX + 6, bedY - 8, 18, 10, 0xFFFF);
+    }
+  } else if (currentScene == SCENE_ACTIVITY) {
+    int matY = GROUND_Y - 18 - bandY;
+    int shift = imod((int)(camX * 0.45f), 74);
+    for (int x = -10; x < SW + 50; x += 74) {
+      band.fillRoundRect(x - shift, matY, 46, 12, 5, ((x / 74) % 2 == 0) ? cfg.accentA : cfg.accentB);
+    }
+    int toyY = GROUND_Y - 42 - bandY;
+    if (toyY < band.height() && toyY + 16 > 0) {
+      band.fillRect(34, toyY, 16, 16, cfg.accentC);
+      band.fillRect(54, toyY + 6, 12, 10, cfg.accentA);
+    }
+  }
+}
+
+static void drawGroundBand(float camX, int bandY) {
+  const SceneConfig& cfg = currentSceneConfig();
+  int gy = GROUND_Y - bandY;
+  band.fillRect(0, gy, SW, SH - GROUND_Y, cfg.groundColor);
+  if (cfg.indoor) {
+    for (int y = gy; y < band.height(); y += 10) {
+      if (y >= 0) band.drawFastHLine(0, y, SW, cfg.groundLineColor);
+    }
+    int shift = imod((int)camX, 36);
+    for (int x = -40; x < SW + 40; x += 36) {
+      int xx = x - shift;
+      int lineY = max(0, gy);
+      int lineH = max(0, (int)band.height() - gy);
+      if (lineH > 0) band.drawFastVLine(xx, lineY, lineH, cfg.groundLineColor);
+    }
+  } else {
+    for (int y = gy; y < band.height(); y += 8) {
+      if (y >= 0) band.drawFastHLine(0, y, SW, cfg.groundLineColor);
+    }
+    int shift = (int)camX;
+    for (int x = -40; x < SW + 40; x += 32) {
+      int xx = x - imod(shift, 32);
+      int yy = (GROUND_Y + 18 + (imod(x + shift, 64) / 8)) - bandY;
+      band.fillRect(xx, yy, 10, 3, cfg.accentB);
+    }
   }
 }
 static void drawTreesMixedBand(float camX, int bandY) {
+  if (!currentSceneConfig().showTrees) return;
   float px = camX * 0.60f;
   const int spacing = 120;
   int first = (int)floor((px - SW) / spacing) - 3;
@@ -2986,60 +4458,118 @@ static void drawTreesMixedBand(float camX, int bandY) {
     int x = i * spacing - (int)px + jitter;
 
     bool useArbre = ((hh % 3) == 0);
+    const BeansAssets::AssetId assetId = useArbre
+        ? BeansAssets::AssetId::SceneCommonPropTreeBroadleaf
+        : BeansAssets::AssetId::SceneCommonPropTreePine;
     const uint16_t* img = useArbre ? ARBRE_IMG : SAPIN_IMG;
     int w = useArbre ? (int)ARBRE_W : (int)SAPIN_W;
     int h = useArbre ? (int)ARBRE_H : (int)SAPIN_H;
+    runtimeSingleDimensions(assetId, w, h);
 
     int yOnGround = GROUND_Y - h;
     int yLocal = yOnGround - bandY;
     if (yLocal >= band.height() || yLocal + h <= 0) continue;
-    drawImageKeyedOnBand(img, w, h, x, yLocal);
+    if (!drawRuntimeSingleAssetOnBand(assetId, x, yLocal)) {
+      drawImageKeyedOnBand(img, w, h, x, yLocal);
+    }
   }
 }
 
-static void drawFixedObjectsBand(float camX, int bandY) {
-  {
-    const uint16_t* img = berriesLeftAvailable ? BBAIE_IMG : BSANS_IMG;
-    int w = berriesLeftAvailable ? (int)BBAIE_W : (int)BSANS_W;
-    int h = berriesLeftAvailable ? (int)BBAIE_H : (int)BSANS_H;
-    int x = (int)roundf(bushLeftX - camX);
-    int yOnGround = GROUND_Y - h + BUSH_Y_OFFSET;
-    int yLocal = yOnGround - bandY;
-    if (!(yLocal >= band.height() || yLocal + h <= 0) && !(x > SW || x + w < 0)) {
-      drawImageKeyedOnBand(img, w, h, x, yLocal);
-    }
-  }
+static void drawSupplyStationBand(float camX, int bandY) {
+  const SceneConfig& cfg = currentSceneConfig();
+  int w = sceneSupplyPropWidth();
+  int h = (currentScene == SCENE_DECK) ? 26 : 22;
+  int x = (int)roundf(bushLeftX - camX);
+  int yOnGround = GROUND_Y - h + 8;
+  int yLocal = yOnGround - bandY;
+  if (yLocal >= band.height() || yLocal + h <= 0 || x > SW || x + w < 0) return;
 
-  if (puddleVisible) {
-    const uint16_t* img = FLAQUE_IMG;
-    int w = (int)FLAQUE_W, h = (int)FLAQUE_H;
-    int x = (int)roundf(puddleX - camX);
-    int yOnGround = GROUND_Y - h + PUDDLE_Y_OFFSET;
-    int yLocal = yOnGround - bandY;
-    if (!(yLocal >= band.height() || yLocal + h <= 0) && !(x > SW || x + w < 0)) {
-      drawImageKeyedOnBand(img, w, h, x, yLocal);
-    }
-  }
+  uint16_t fill = berriesLeftAvailable ? cfg.accentA : 0x9CD3;
+  uint16_t border = berriesLeftAvailable ? cfg.accentC : 0x6B4D;
+  band.fillRoundRect(x, yLocal, w, h, 4, fill);
+  band.drawRoundRect(x, yLocal, w, h, 4, border);
+  band.drawFastHLine(x + 4, yLocal + 8, w - 8, border);
+  band.drawFastVLine(x + w / 2, yLocal + 4, h - 8, border);
+}
+
+static void drawWaterStationBand(float camX, int bandY) {
+  const SceneConfig& cfg = currentSceneConfig();
+  int w = sceneWaterPropWidth();
+  int h = (currentScene == SCENE_DECK) ? 28 : 30;
+  int x = (int)roundf(puddleX - camX);
+  int yOnGround = GROUND_Y - h + 10;
+  int yLocal = yOnGround - bandY;
+  if (yLocal >= band.height() || yLocal + h <= 0 || x > SW || x + w < 0) return;
+
+  uint16_t body = puddleVisible ? cfg.accentB : 0xC618;
+  band.fillRoundRect(x + 6, yLocal, w - 12, h - 8, 5, 0xFFFF);
+  band.drawRoundRect(x + 6, yLocal, w - 12, h - 8, 5, cfg.accentC);
+  band.fillRect(x + (w / 2) - 4, yLocal + 8, 8, h - 4, body);
+  band.fillCircle(x + (w / 2), yLocal + h - 4, 8, body);
+}
+
+static void drawFixedObjectsBand(float camX, int bandY) {
+  drawSupplyStationBand(camX, bandY);
+  drawWaterStationBand(camX, bandY);
 
   if (poopVisible) {
-    int w = (int)poop::W;
-    int h = (int)poop::H;
+    int w = (int)WASTE_W;
+    int h = (int)WASTE_H;
     int x = (int)roundf(poopWorldX - camX);
     int yOnGround = GROUND_Y - h + 18;
     int yLocal = yOnGround - bandY;
     if (!(yLocal >= band.height() || yLocal + h <= 0) && !(x > SW || x + w < 0)) {
-      drawImageKeyedOnBand(poop::dino_caca_003, w, h, x, yLocal);
+      if (!drawRuntimeAnimationFrameOnBand("props_gameplay", "prop.gameplay.waste.default", 2, x, yLocal, w, h)) {
+        drawImageKeyedOnBand(BeansAssets::wasteDefaultFrame(2), w, h, x, yLocal);
+      }
     }
   }
 }
 
 static void drawWorldBand(float camX, int bandY, int bh) {
-  band.fillRect(0, 0, SW, BAND_H, C_SKY);
+  band.fillRect(0, 0, SW, BAND_H, currentSceneConfig().skyColor);
   band.setClipRect(0, 0, SW, bh);
+  drawSceneCloudsBand(camX, bandY);
   drawMountainImagesBand(camX, bandY);
+  drawSceneBackdropBand(camX, bandY);
   drawGroundBand(camX, bandY);
   drawTreesMixedBand(camX, bandY);
   drawFixedObjectsBand(camX, bandY);
+}
+
+static void drawAutoBehaviorBubbleOnBand(int bandY, int dinoX, int dinoY) {
+  if (phase != PHASE_ALIVE) return;
+  if (task.active || appMode != MODE_PET) return;
+  if (!autoBehavior.active || autoBehavior.bubble[0] == 0) return;
+  if ((int32_t)(millis() - autoBehavior.bubbleUntil) >= 0) return;
+
+  const int dw = triW(pet.stage);
+  setCNFont(band);
+  band.setTextSize(1);
+  int textW = band.textWidth(autoBehavior.bubble);
+  resetFont(band);
+
+  int bubbleW = clampi(textW + 18, 58, SW - 8);
+  int bubbleH = 22;
+  int bubbleX = clampi(dinoX + dw / 2 - bubbleW / 2, 4, SW - bubbleW - 4);
+  int bubbleY = max(4, dinoY - bubbleH - 14);
+  int localY = bubbleY - bandY;
+  if (localY >= band.height() || localY + bubbleH + 10 <= 0) return;
+
+  band.fillRoundRect(bubbleX, localY, bubbleW, bubbleH, 8, 0xFFFF);
+  band.drawRoundRect(bubbleX, localY, bubbleW, bubbleH, 8, TFT_BLACK);
+  int tailX = clampi(dinoX + dw / 2, bubbleX + 12, bubbleX + bubbleW - 12);
+  int tailTipY = localY + bubbleH + 7;
+  band.drawLine(tailX - 5, localY + bubbleH - 1, tailX, tailTipY, TFT_BLACK);
+  band.drawLine(tailX + 5, localY + bubbleH - 1, tailX, tailTipY, TFT_BLACK);
+  band.fillTriangle(tailX - 4, localY + bubbleH - 1, tailX + 4, localY + bubbleH - 1, tailX, tailTipY - 1, 0xFFFF);
+
+  setCNFont(band);
+  band.setTextColor(TFT_BLACK, 0xFFFF);
+  band.setTextDatum(middle_center);
+  band.drawString(autoBehavior.bubble, bubbleX + bubbleW / 2, localY + bubbleH / 2 + 1);
+  band.setTextDatum(top_left);
+  resetFont(band);
 }
 
 // ================== RENDER ==================
@@ -3061,26 +4591,35 @@ static inline void renderOneBand(int y0, int bh, int dinoX, int dinoY, const uin
     if (dinoY < y0 + bh && dinoY + DH > y0) {
       drawImageKeyedOnBand(frame, DW, DH, dinoX, dinoY - y0, flipX, shade);
     }
+    drawAutoBehaviorBubbleOnBand(y0, dinoX, dinoY);
   } else if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
-    const uint16_t* eggFrame = egg::dino_oeuf_001;
+    uint16_t eggFrameIndex = 0;
+    const uint16_t* eggFrame = BeansAssets::eggHatchFrame(0);
     if (phase == PHASE_HATCHING) {
-      if (hatchIdx == 0) eggFrame = egg::dino_oeuf_001;
-      else if (hatchIdx == 1) eggFrame = egg::dino_oeuf_002;
-      else if (hatchIdx == 2) eggFrame = egg::dino_oeuf_003;
-      else eggFrame = egg::dino_oeuf_004;
+      eggFrameIndex = hatchIdx;
+      eggFrame = BeansAssets::eggHatchFrame(hatchIdx);
     }
-    int w = (int)egg::W, h = (int)egg::H;
+    int w = (int)EGG_W, h = (int)EGG_H;
     float t = (float)millis() * 0.008f;
     int bob = (int)roundf(sinf(t) * 2.0f);
     int ex = dinoX;
     int ey = (GROUND_Y - 40) + bob;
-    if (ey < y0 + bh && ey + h > y0) drawImageKeyedOnBand(eggFrame, w, h, ex, ey - y0);
+    if (ey < y0 + bh && ey + h > y0) {
+      if (!drawRuntimeAnimationFrameOnBand("character_triceratops", "character.triceratops.egg.hatch", eggFrameIndex, ex, ey - y0, w, h)) {
+        drawImageKeyedOnBand(eggFrame, w, h, ex, ey - y0);
+      }
+    }
   } else if (phase == PHASE_TOMB || phase == PHASE_RESTREADY) {
-    int w = (int)tombe_W;
-    int h = (int)tombe_H;
+    int w = (int)TOMBE_W;
+    int h = (int)TOMBE_H;
+    runtimeSingleDimensions(BeansAssets::AssetId::PropGameplayGraveMarker, w, h);
     int tx = (SW - w) / 2;
     int ty = (GROUND_Y - h + 10);
-    if (ty < y0 + bh && ty + h > y0) drawImageKeyedOnBand(tombe, w, h, tx, ty - y0);
+    if (ty < y0 + bh && ty + h > y0) {
+      if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::PropGameplayGraveMarker, tx, ty - y0)) {
+        drawImageKeyedOnBand(TOMBE_IMG, w, h, tx, ty - y0);
+      }
+    }
   }
 
   overlayUIIntoBand(y0, bh);
@@ -3090,7 +4629,7 @@ static inline void renderOneBand(int y0, int bh, int dinoX, int dinoY, const uin
 static void renderFrameOptimized(int dinoX, int dinoY, const uint16_t* frame, bool flipX, uint8_t shade) {
   bool camMoved = (fabsf(camX - lastCamX) > 0.001f);
   int DH = (phase == PHASE_ALIVE) ? triH(pet.stage)
-           : (phase == PHASE_TOMB || phase == PHASE_RESTREADY) ? (int)tombe_H
+           : (phase == PHASE_TOMB || phase == PHASE_RESTREADY) ? (int)TOMBE_H
            : 60;
 
   if (camMoved) {
@@ -3130,6 +4669,69 @@ static void renderFrameOptimized(int dinoX, int dinoY, const uint16_t* frame, bo
   }
 
   lastCamX = camX;
+}
+
+static void renderGameFrame(uint32_t now) {
+  if (uiSpriteDirty) {
+    uint8_t nbtn = uiButtonCount();
+    if (uiSel >= nbtn) uiSel = 0;
+    rebuildUISprites(now);
+    uiSpriteDirty = false;
+  }
+
+  if (phase == PHASE_ALIVE) {
+    uint8_t animId = animIdForState(pet.stage, state);
+    if (!task.active && appMode == MODE_PET && autoBehavior.active) {
+      AutoBehaviorArt art = (autoBehavior.art == AUTO_ART_AUTO) ? defaultAutoArtForMove(autoBehavior.moveMode) : autoBehavior.art;
+      animId = autoBehaviorAnimIdForStage(pet.stage, art);
+    }
+
+    bool forceFace = false;
+    bool faceRight = false;
+    if (task.active && task.kind == TASK_HUG && task.ph == PH_DO) {
+      animId = BeansAssets::triceratopsLoveAnimId(pet.stage);
+    }
+
+    if (task.active && task.ph == PH_DO) {
+      if (task.kind == TASK_EAT) { forceFace = true; faceRight = false; }
+      if (task.kind == TASK_DRINK) { forceFace = true; faceRight = true; }
+    }
+
+    if ((int32_t)(now - nextAnimTick) >= 0) {
+      uint8_t cnt = triAnimCount(pet.stage, animId);
+      if (cnt == 0) cnt = 1;
+      animIdx = (animIdx + 1) % cnt;
+      nextAnimTick = now + frameMsForState(state);
+    }
+
+    int dinoX = (int)roundf(worldX - camX);
+    if (dinoX > DZ_R) camX = worldX - (float)DZ_R;
+    else if (dinoX < DZ_L) camX = worldX - (float)DZ_L;
+    camX = clampf(camX, 0.0f, worldW - (float)SW);
+    dinoX = (int)roundf(worldX - camX);
+
+    int dinoY = (GROUND_Y - TRI_FOOT_Y);
+    const uint16_t* frame = triGetFrame(pet.stage, animId, animIdx);
+
+    bool flipX = flipForMovingRight(movingRight);
+    if (forceFace) flipX = faceRight ? true : false;
+
+    uint8_t shade = 0;
+    if (pet.hygiene <= 0.0f) shade = 2;
+    else if (pet.hygiene < 20.0f) shade = 1;
+
+    tft.startWrite();
+    renderFrameOptimized(dinoX, dinoY, frame, flipX, shade);
+    uiForceBands = false;
+    tft.endWrite();
+  } else {
+    int dinoX = (int)roundf(worldX - camX);
+    int dinoY = (GROUND_Y - TRI_FOOT_Y);
+    tft.startWrite();
+    renderFrameOptimized(dinoX, dinoY, nullptr, false, 0);
+    uiForceBands = false;
+    tft.endWrite();
+  }
 }
 
 // ================== enterState / timing ==================
@@ -3217,6 +4819,7 @@ static bool startTask(TaskKind k, uint32_t now) {
   // IMPORTANT: LAVER / JOUER passent par mini-jeux -> on refuse ici
   if (k == TASK_WASH || k == TASK_PLAY) return false;
 
+  clearAutoBehavior();
   task.active = true;
   task.kind   = k;
   task.ph     = PH_GO;
@@ -3462,6 +5065,7 @@ static void handleDeath(uint32_t now) {
   task.active = false;
   task.kind = TASK_NONE;
   appMode = MODE_PET;
+  clearAutoBehavior();
   enterState(ST_DEAD, now);
   activityShowFull(now, "\xe5\x8d\x9a\xe5\xa3\xab\xe6\x9c\xaa\xe8\x83\xbd\xe5\xae\x8c\xe6\x88\x90\xe7\x85\xa7\xe6\x8a\xa4\xef\xbc\x8c\xe5\xae\x83\xe7\xa6\xbb\xe5\xbc\x80\xe4\xba\x86\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe3\x80\x82");  // 博士未能完成照护，它离开了罗德岛。
   uiSel = 0;
@@ -3486,7 +5090,7 @@ static uint32_t lastPetTick = 0;
 
 static void updatePetTick(uint32_t now) {
   if (!pet.vivant) return;
-  if (phase != PHASE_ALIVE && phase != PHASE_RESTREADY) return;
+  if (phase != PHASE_ALIVE) return;
 
   bool sleeping = (state == ST_SLEEP);
   auto add = [](float &v, float dv){ v = clamp01f(v + dv); };
@@ -3509,6 +5113,42 @@ static void updatePetTick(uint32_t now) {
 
   updateHealthTick(now);
 
+  pet.lungmenCoin += LUNGMEN_COIN_PER_MIN;
+  pet.ageMin++;
+  evolutionTick(now);
+
+  uiSpriteDirty = true;
+  uiForceBands  = true;
+}
+
+static void applyOfflineMinuteTick(uint32_t now, bool sleeping) {
+  if (!pet.vivant) return;
+  if (phase != PHASE_ALIVE) return;
+
+  auto add = [](float &v, float dv){ v = clamp01f(v + dv); };
+
+  if (sleeping) {
+    add(pet.faim,    -1.0f);
+    add(pet.soif,    -1.0f);
+    add(pet.hygiene, -0.5f);
+    add(pet.humeur,  +0.2f);
+    add(pet.fatigue, SLEEP_GAIN_PER_SEC * 60.0f);
+    add(pet.amour,   -0.2f);
+    add(pet.sante,   +0.1f);
+  } else {
+    add(pet.faim,    AWAKE_HUNGER_D);
+    add(pet.soif,    AWAKE_THIRST_D);
+    add(pet.hygiene, AWAKE_HYGIENE_D);
+    add(pet.humeur,  AWAKE_MOOD_D);
+    add(pet.fatigue, AWAKE_FATIGUE_D);
+    add(pet.amour,   AWAKE_LOVE_D);
+  }
+
+  updateHealthTick(now);
+
+  if (!pet.vivant || phase != PHASE_ALIVE) return;
+
+  pet.lungmenCoin += LUNGMEN_COIN_PER_MIN;
   pet.ageMin++;
   evolutionTick(now);
 
@@ -3522,7 +5162,8 @@ static void processOfflineSettlement(uint32_t now) {
 
   uint32_t currentUnixTime = 0;
   if (!readCurrentUnixTime(currentUnixTime)) {
-    offlineInfo.skippedNoClock = true;
+    offlineInfo.skippedNoClock = !rtcPresent;
+    offlineInfo.skippedInvalidRtc = rtcPresent;
     buildOfflineNotice();
     return;
   }
@@ -3548,8 +5189,37 @@ static void processOfflineSettlement(uint32_t now) {
     return;
   }
 
+  if (!pet.vivant || phase == PHASE_TOMB || phase == PHASE_RESTREADY) {
+    buildOfflineNotice();
+    if (saveReady) saveNow(now, "boot_phase_hold");
+    return;
+  }
+
   offlineInfo.appliedMin = min(elapsedMin, OFFLINE_SETTLE_CAP_MIN);
   offlineInfo.capped = (offlineInfo.appliedMin < elapsedMin);
+  offlineInfo.sleepingMode = savedWasSleeping;
+  offlineInfo.stageBefore = pet.stage;
+  offlineInfo.phaseBefore = phase;
+
+  const float beforeFaim = pet.faim;
+  const float beforeSoif = pet.soif;
+  const float beforeHygiene = pet.hygiene;
+  const float beforeHumeur = pet.humeur;
+  const float beforeFatigue = pet.fatigue;
+  const float beforeAmour = pet.amour;
+  const float beforeSante = pet.sante;
+  const uint32_t beforeCoin = pet.lungmenCoin;
+
+  if (!berriesLeftAvailable) {
+    berriesLeftAvailable = true;
+    berriesRespawnAt = 0;
+    offlineInfo.supplyRespawned = true;
+  }
+  if (!puddleVisible) {
+    puddleVisible = true;
+    puddleRespawnAt = 0;
+    offlineInfo.waterRespawned = true;
+  }
 
   task.active = false;
   task.kind = TASK_NONE;
@@ -3567,13 +5237,28 @@ static void processOfflineSettlement(uint32_t now) {
 
   offlineSettlementInProgress = true;
   for (uint32_t i = 0; i < offlineInfo.appliedMin; ++i) {
-    updatePetTick(now);
+    applyOfflineMinuteTick(now, offlineInfo.sleepingMode);
     if (!pet.vivant || phase == PHASE_TOMB) {
       offlineInfo.petDied = true;
       break;
     }
+    if (phase != PHASE_ALIVE) break;
   }
   offlineSettlementInProgress = false;
+
+  offlineInfo.stageAfter = pet.stage;
+  offlineInfo.phaseAfter = phase;
+  offlineInfo.stageChanged = (offlineInfo.stageAfter != offlineInfo.stageBefore);
+  offlineInfo.phaseChanged = (offlineInfo.phaseAfter != offlineInfo.phaseBefore);
+  offlineInfo.endedCritical = pet.vivant && (healthCriticalCount() > 0);
+  offlineInfo.deltaFaim = roundDelta(pet.faim, beforeFaim);
+  offlineInfo.deltaSoif = roundDelta(pet.soif, beforeSoif);
+  offlineInfo.deltaHygiene = roundDelta(pet.hygiene, beforeHygiene);
+  offlineInfo.deltaHumeur = roundDelta(pet.humeur, beforeHumeur);
+  offlineInfo.deltaFatigue = roundDelta(pet.fatigue, beforeFatigue);
+  offlineInfo.deltaAmour = roundDelta(pet.amour, beforeAmour);
+  offlineInfo.deltaSante = roundDelta(pet.sante, beforeSante);
+  offlineInfo.deltaCoin = (int32_t)(pet.lungmenCoin - beforeCoin);
 
   if (pet.vivant) {
     if (phase == PHASE_ALIVE || phase == PHASE_RESTREADY) enterState(restoreState, now);
@@ -3585,34 +5270,206 @@ static void processOfflineSettlement(uint32_t now) {
   if (saveReady) saveNow(now, "boot_offline");
 }
 
-// ================== Idle autonome (80% marche / 10% assis / 10% cligne) ==================
+static void applyDailyEventNoticeEffects(const DailyEventNotice& notice, uint32_t now) {
+  if (!pet.vivant) return;
+  auto add = [](float &v, int dv){ v = clamp01f(v + (float)dv); };
+  add(pet.faim, notice.deltaFaim);
+  add(pet.soif, notice.deltaSoif);
+  add(pet.fatigue, notice.deltaFatigue);
+  add(pet.hygiene, notice.deltaHygiene);
+  add(pet.humeur, notice.deltaHumeur);
+  add(pet.amour, notice.deltaAmour);
+  add(pet.sante, notice.deltaSante);
+  updateHealthTick(now);
+  uiSpriteDirty = true;
+  uiForceBands = true;
+}
+
+static int chooseDailyEventIndex(const bool used[]) {
+  if (!dailyEventTableReady || dailyEventCount == 0) return -1;
+  uint32_t totalWeight = 0;
+  for (uint8_t i = 0; i < dailyEventCount; ++i) {
+    if (!dailyEventDefs[i].enabled || dailyEventDefs[i].weight == 0) continue;
+    if (used && used[i]) continue;
+    totalWeight += dailyEventDefs[i].weight;
+  }
+  if (totalWeight == 0) return -1;
+
+  uint32_t roll = (uint32_t)random(0, (long)totalWeight);
+  uint32_t acc = 0;
+  for (uint8_t i = 0; i < dailyEventCount; ++i) {
+    if (!dailyEventDefs[i].enabled || dailyEventDefs[i].weight == 0) continue;
+    if (used && used[i]) continue;
+    acc += dailyEventDefs[i].weight;
+    if (roll < acc) return (int)i;
+  }
+  return -1;
+}
+
+static void queueDailyEventsForDay(uint32_t dayIndex, bool offlineFlag, uint32_t now) {
+  if (!dailyEventTableReady || dailyEventCount == 0) return;
+  bool used[DAILY_EVENT_MAX] = {0};
+  uint8_t count = (uint8_t)random(1, 4);
+  if (count > dailyEventCount) count = dailyEventCount;
+
+  for (uint8_t n = 0; n < count; ++n) {
+    int picked = chooseDailyEventIndex(used);
+    if (picked < 0) break;
+    used[picked] = true;
+
+    const DailyEventDef& def = dailyEventDefs[picked];
+    DailyEventNotice notice;
+    memset(&notice, 0, sizeof(notice));
+    notice.valid = true;
+    notice.offline = offlineFlag;
+    notice.dayIndex = dayIndex;
+    notice.art = (def.art == AUTO_ART_AUTO) ? AUTO_ART_ASSIE : def.art;
+    strncpy(notice.eventName, def.eventName, sizeof(notice.eventName) - 1);
+    strncpy(notice.summary, def.summary, sizeof(notice.summary) - 1);
+    notice.deltaFaim = def.deltaFaim;
+    notice.deltaSoif = def.deltaSoif;
+    notice.deltaFatigue = def.deltaFatigue;
+    notice.deltaHygiene = def.deltaHygiene;
+    notice.deltaHumeur = def.deltaHumeur;
+    notice.deltaAmour = def.deltaAmour;
+    notice.deltaSante = def.deltaSante;
+
+    applyDailyEventNoticeEffects(notice, now);
+    enqueueDailyEventNotice(notice);
+    if (!pet.vivant) break;
+  }
+}
+
+static void maybeOpenPendingDailyEventModal() {
+  if (isModalMode() || isMiniGameMode()) return;
+  if (task.active) return;
+  if (!hasPendingDailyEventNotice()) return;
+  openDailyEventModal();
+}
+
+static void processDailyEvents(uint32_t now, bool fromBoot) {
+  uint32_t unixTime = 0;
+  if (!readCurrentUnixTime(unixTime)) return;
+
+  uint32_t currentDay = unixTime / 86400UL;
+  if (currentDay == 0) return;
+
+  if (lastDailyEventDay == 0) {
+    lastDailyEventDay = currentDay;
+    if (saveReady) saveNow(now, "event_seed");
+    return;
+  }
+  if (currentDay <= lastDailyEventDay) return;
+  if (phase != PHASE_ALIVE) {
+    lastDailyEventDay = currentDay;
+    if (saveReady) saveNow(now, "event_skip");
+    return;
+  }
+
+  for (uint32_t day = lastDailyEventDay + 1; day <= currentDay; ++day) {
+    queueDailyEventsForDay(day, fromBoot, now);
+    if (!pet.vivant) break;
+  }
+  lastDailyEventDay = currentDay;
+  if (saveReady) saveNow(now, fromBoot ? "event_boot" : "event_live");
+}
+
+// ================== Idle autonome (config table driven) ==================
+static int chooseAutoBehaviorIndex() {
+  if (!autoBehaviorTableReady || autoBehaviorCount == 0) return -1;
+
+  uint32_t totalWeight = 0;
+  for (uint8_t i = 0; i < autoBehaviorCount; ++i) {
+    if (!autoBehaviorDefs[i].enabled || autoBehaviorDefs[i].weight == 0) continue;
+    totalWeight += autoBehaviorDefs[i].weight;
+  }
+  if (totalWeight == 0) return -1;
+
+  uint32_t roll = (uint32_t)random(0, (long)totalWeight);
+  uint32_t acc = 0;
+  for (uint8_t i = 0; i < autoBehaviorCount; ++i) {
+    if (!autoBehaviorDefs[i].enabled || autoBehaviorDefs[i].weight == 0) continue;
+    acc += autoBehaviorDefs[i].weight;
+    if (roll < acc) return (int)i;
+  }
+  return (int)(autoBehaviorCount - 1);
+}
+
+static void startConfiguredAutoBehavior(uint8_t index, uint32_t now) {
+  if (index >= autoBehaviorCount) return;
+
+  const AutoBehaviorDef& def = autoBehaviorDefs[index];
+  clearAutoBehavior();
+
+  autoBehavior.active = true;
+  autoBehavior.index = (int8_t)index;
+  autoBehavior.moveMode = def.moveMode;
+  autoBehavior.art = (def.art == AUTO_ART_AUTO) ? defaultAutoArtForMove(def.moveMode) : def.art;
+  strncpy(autoBehavior.name, def.behavior, sizeof(autoBehavior.name) - 1);
+  chooseBehaviorBubbleText(def.bubble, autoBehavior.bubble, sizeof(autoBehavior.bubble));
+  if (autoBehavior.bubble[0] == 0) {
+    strncpy(autoBehavior.bubble, autoBehavior.name, sizeof(autoBehavior.bubble) - 1);
+  }
+
+  uint32_t minMs = def.minMs;
+  uint32_t maxMs = max((uint32_t)def.maxMs, minMs);
+  uint32_t span = maxMs - minMs;
+  uint32_t dur = minMs + (span > 0 ? (uint32_t)random(0, (long)span + 1L) : 0UL);
+  autoBehavior.until = now + dur;
+  autoBehavior.bubbleUntil = now + min((uint32_t)dur, (uint32_t)AUTO_BEHAVIOR_BUBBLE_MS);
+
+  if (def.moveMode == AUTO_MOVE_WALK) {
+    float minX = worldMin + 10.0f;
+    float maxX = worldMax - (float)triW(pet.stage) - 10.0f;
+    if (maxX <= minX) maxX = minX + 1.0f;
+    idleTargetX = (float)random((long)minX, (long)maxX);
+    idleWalking = true;
+    movingRight = (idleTargetX >= worldX);
+    enterState(ST_WALK, now);
+  } else {
+    idleWalking = false;
+    if (autoBehavior.art == AUTO_ART_CLIGNE) enterState(ST_BLINK, now);
+    else enterState(ST_SIT, now);
+  }
+
+  nextIdleDecisionAt = autoBehavior.until + (uint32_t)random((long)AUTO_BEHAVIOR_MIN_GAP_MS, (long)AUTO_BEHAVIOR_MAX_GAP_MS + 1L);
+}
+
+static void startFallbackIdleBehavior(uint32_t now) {
+  uint32_t r = (uint32_t)random(0, 100);
+
+  clearAutoBehavior();
+  if (r < 80) {
+    float minX = worldMin + 10.0f;
+    float maxX = worldMax - (float)triW(pet.stage) - 10.0f;
+    idleTargetX = (float)random((long)minX, (long)maxX);
+    idleWalking = true;
+    idleUntil = now + (uint32_t)random(3000, 8500);
+    enterState(ST_WALK, now);
+  } else if (r < 90) {
+    idleWalking = false;
+    idleUntil = now + (uint32_t)random(900, 3000);
+    enterState(ST_SIT, now);
+  } else {
+    idleWalking = false;
+    idleUntil = now + (uint32_t)random(900, 2000);
+    enterState(ST_BLINK, now);
+  }
+  nextIdleDecisionAt = now + (uint32_t)random(2000, 5000);
+}
+
 static void idleDecide(uint32_t now) {
   if (phase != PHASE_ALIVE) return;
   if (task.active) return;
   if (state == ST_SLEEP) return;
   if (appMode != MODE_PET) return;
 
-  uint32_t r = (uint32_t)random(0, 100);
-
-  if (r < 80) {
-    float minX = worldMin + 10.0f;
-    float maxX = worldMax - (float)triW(pet.stage) - 10.0f;
-    float tx = (float)random((int)minX, (int)maxX);
-    idleTargetX = tx;
-    idleWalking = true;
-    idleUntil = now + (uint32_t)random(3000, 8500); //marche
-    enterState(ST_WALK, now);
-  } else if (r < 90) {
-    idleWalking = false;
-    idleUntil = now + (uint32_t)random(900, 3000); // assie
-    enterState(ST_SIT, now);
+  int pick = chooseAutoBehaviorIndex();
+  if (pick >= 0) {
+    startConfiguredAutoBehavior((uint8_t)pick, now);
   } else {
-    idleWalking = false;
-    idleUntil = now + (uint32_t)random(900, 2000);  //cligne
-    enterState(ST_BLINK, now);
+    startFallbackIdleBehavior(now);
   }
-
-  nextIdleDecisionAt = now + (uint32_t)random(2000, 5000);
 }
 
 static void idleUpdate(uint32_t now) {
@@ -3625,7 +5482,10 @@ static void idleUpdate(uint32_t now) {
     idleDecide(now);
   }
 
-  if (idleUntil != 0 && (int32_t)(now - idleUntil) >= 0) {
+  if (autoBehavior.active && idleUntil == 0 && (int32_t)(now - autoBehavior.until) >= 0) {
+    clearAutoBehavior();
+    enterState(ST_SIT, now);
+  } else if (!autoBehavior.active && idleUntil != 0 && (int32_t)(now - idleUntil) >= 0) {
     idleUntil = 0;
     enterState(ST_SIT, now);
   }
@@ -3636,7 +5496,8 @@ static void idleUpdate(uint32_t now) {
       worldX = goal;
       idleWalking = false;
       enterState(ST_SIT, now);
-      idleUntil = now + (uint32_t)random(400, 1200);
+      if (autoBehavior.active && autoBehavior.until < now + 500UL) autoBehavior.until = now + 500UL;
+      if (!autoBehavior.active) idleUntil = now + (uint32_t)random(400, 1200);
       return;
     }
     movingRight = (goal >= worldX);
@@ -3678,14 +5539,28 @@ static void handleEncoderUI(uint32_t now) {
 
   uint8_t nbtn = uiButtonCount();
 
-  if (dd != 0) {
-    int s = (int)uiSel + (int)dd;
-    s %= (int)nbtn; if (s < 0) s += (int)nbtn;
-    uiSel = (uint8_t)s;
+  while (dd < 0) {
+    if (uiShowSceneArrows() && uiSel == 0) {
+      switchSceneByOffset(-1, now);
+    } else if (uiSel > 0) {
+      uiSel--;
+    }
+    dd++;
+    uiSpriteDirty = true;
+    uiForceBands  = true;
+  }
+  while (dd > 0) {
+    if (uiShowSceneArrows() && uiSel == (uint8_t)(nbtn - 1)) {
+      switchSceneByOffset(+1, now);
+    } else if (uiSel + 1 < nbtn) {
+      uiSel++;
+    }
+    dd--;
     lastDetent = det;
     uiSpriteDirty = true;
     uiForceBands  = true;
   }
+  if (dd == 0) lastDetent = det;
 
   bool raw = readBtnPressedRaw();
   if (raw != lastBtnRaw) { lastBtnRaw = raw; btnChangeAt = now; }
@@ -3704,17 +5579,21 @@ static void handleButtonsUI(uint32_t now) {
   uint8_t nbtn = uiButtonCount();
 
   if (btnLeftEdge) {
-    int s = (int)uiSel - 1;
-    if (s < 0) s = (int)nbtn - 1;
-    uiSel = (uint8_t)s;
+    if (uiShowSceneArrows() && uiSel == 0) {
+      switchSceneByOffset(-1, now);
+    } else if (uiSel > 0) {
+      uiSel--;
+    }
     uiSpriteDirty = true;
     uiForceBands  = true;
   }
 
   if (btnRightEdge) {
-    int s = (int)uiSel + 1;
-    if (s >= (int)nbtn) s = 0;
-    uiSel = (uint8_t)s;
+    if (uiShowSceneArrows() && uiSel == (uint8_t)(nbtn - 1)) {
+      switchSceneByOffset(+1, now);
+    } else if (uiSel + 1 < nbtn) {
+      uiSel++;
+    }
     uiSpriteDirty = true;
     uiForceBands  = true;
   }
@@ -3876,6 +5755,7 @@ static void handleTouchUI(uint32_t now) {
   if (touch.stableDown || pressedEdge) {
     int ty = touch.y;
     int tx = touch.x;
+    touch.lastBtn = -1;
 const int SAFE = 8;                 // évite les zones chiantes tout au bord
 if (tx < SAFE) tx = SAFE;
 if (tx > SW - 1 - SAFE) tx = SW - 1 - SAFE;
@@ -3905,11 +5785,29 @@ if (canTopBtns && ty >= (TOP_BTN_Y - TOP_BTN_TOUCH_PAD) && ty < (TOP_BTN_Y + TOP
   const int TOUCH_PAD_Y = UI_BOT_H; // zone tactile agrandie (haut+bas)
   if (ty >= (SH - UI_BOT_H - TOUCH_PAD_Y) && ty < (SH + TOUCH_PAD_Y)) {
     uint8_t nbtn = uiButtonCount();
+    int btnY0 = SH - UI_BOT_H + uiBottomY() - 4;
+    int btnY1 = btnY0 + uiBottomButtonH() + 8;
 
-const int GAP = 6;
-int bw = uiButtonWidth(nbtn); // <-- doit matcher rebuildUISprites()
-int totalW = (int)nbtn * bw + ((int)nbtn - 1) * GAP;
-int startX = (SW - totalW) / 2;
+    if (uiShowSceneArrows() && ty >= btnY0 && ty < btnY1) {
+      int leftX0 = 0;
+      int leftX1 = uiSceneArrowLeftX() + uiSceneArrowW() + 6;
+      int rightX0 = uiSceneArrowRightX() - 6;
+      int rightX1 = SW;
+      if (tx >= leftX0 && tx < leftX1) {
+        touch.lastBtn = -20;
+      } else if (tx >= rightX0 && tx < rightX1) {
+        touch.lastBtn = -21;
+      }
+    }
+
+if (touch.lastBtn != -20 && touch.lastBtn != -21) {
+
+int GAP = 0;
+int bw = 0;
+int bh = 0;
+int yy = 0;
+int startX = 0;
+calcBottomActionLayout(nbtn, startX, bw, bh, yy, GAP);
 
     int best = 0;
     int bestDist = 999999;
@@ -3929,6 +5827,7 @@ int startX = (SW - totalW) / 2;
     }
 
     touch.lastBtn = (int8_t)idx;
+}
   } else {
     touch.lastBtn = -1;
   }
@@ -3990,6 +5889,18 @@ if (releasedEdge) {
     touch.lastBtn = -1;
         touch.pressBtn = -1;
     uiSpriteDirty = true; uiForceBands = true;
+    return;
+  }
+  if (touch.lastBtn == -20) {
+    switchSceneByOffset(-1, now);
+    touch.lastBtn = -1;
+    touch.pressBtn = -1;
+    return;
+  }
+  if (touch.lastBtn == -21) {
+    switchSceneByOffset(+1, now);
+    touch.lastBtn = -1;
+    touch.pressBtn = -1;
     return;
   }
 
@@ -4064,8 +5975,8 @@ static bool mgUpdate(uint32_t now) {
   }
 
   if (mg.kind == TASK_WASH) {
-    const int CLOUD_W = (int)nuage_W;
-    const int CLOUD_H = (int)nuage_H;
+    const int CLOUD_W = (int)NUAGE_W;
+    const int CLOUD_H = (int)NUAGE_H;
     const int DINO_DRAW_W = triW(pet.stage);
     const int DINO_HIT_W = triW(pet.stage);
     const int DINO_HIT_H = triH(pet.stage);
@@ -4232,8 +6143,8 @@ static void mgDraw(uint32_t now) {
     band.setClipRect(0, 0, SW, bh);
 
     if (appMode == MODE_MG_WASH) {
-const int CLOUD_W = (int)nuage_W;
-const int CLOUD_H = (int)nuage_H;
+const int CLOUD_W = (int)NUAGE_W;
+const int CLOUD_H = (int)NUAGE_H;
 
 const int GROUND = SH - UI_BOT_H - 6;      // <-- sol du mini-jeu
 const int DINO_W = triW(pet.stage);
@@ -4264,7 +6175,9 @@ if (GROUND >= y && GROUND < y + bh) {
       }
 
       if (y + bh > 4 && y < 4 + CLOUD_H) {
-        drawImageKeyedOnBand(nuage, CLOUD_W, CLOUD_H, (int)mgCloudX - CLOUD_W / 2, 4 - y, false, 0);
+        if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropCloud, (int)mgCloudX - CLOUD_W / 2, 4 - y, false, 0)) {
+          drawImageKeyedOnBand(NUAGE_IMG, CLOUD_W, CLOUD_H, (int)mgCloudX - CLOUD_W / 2, 4 - y, false, 0);
+        }
       }
 
       for (int i = 0; i < MG_RAIN_MAX; i++) {
@@ -4312,10 +6225,12 @@ if (GROUND >= y && GROUND < y + bh) {
 
       for (int i = 0; i < MG_BALLOON_MAX; i++) {
         if (!mgBalloons[i].active) continue;
-        int bx = (int)mgBalloons[i].x - (int)ballon_W / 2;
-        int by = (int)mgBalloons[i].y - (int)ballon_H / 2;
-        if (y + bh > by && y < by + (int)ballon_H) {
-          drawImageKeyedOnBand(ballon, (int)ballon_W, (int)ballon_H, bx, by - y, false, 0);
+        int bx = (int)mgBalloons[i].x - (int)BALLON_W / 2;
+        int by = (int)mgBalloons[i].y - (int)BALLON_H / 2;
+        if (y + bh > by && y < by + (int)BALLON_H) {
+          if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropBalloon, bx, by - y, false, 0)) {
+            drawImageKeyedOnBand(BALLON_IMG, (int)BALLON_W, (int)BALLON_H, bx, by - y, false, 0);
+          }
         }
       }
 
@@ -4379,9 +6294,10 @@ if (y + bh > HUD_TOP) {
 
 // ================== RESET ==================
 static void resetStatsToDefault() {
+  currentScene = SCENE_DORM;
   pet.faim=60; pet.soif=60; pet.hygiene=80; pet.humeur=60;
   pet.fatigue=100; pet.amour=60;
-  pet.sante=80; pet.ageMin=0; pet.vivant=true;
+  pet.sante=80; pet.ageMin=0; pet.lungmenCoin=0; pet.vivant=true;
   pet.stage=AGE_JUNIOR;
   pet.evolveProgressMin=0;
   strcpy(petName, "???");
@@ -4390,6 +6306,7 @@ static void resetStatsToDefault() {
 static void resetToEgg(uint32_t now) {
   (void)now;
   resetStatsToDefault();
+  applySceneConfig(SCENE_DORM, false);
   phase = PHASE_EGG;
   task.active = false;
   state = ST_SIT;
@@ -4409,6 +6326,9 @@ static void resetToEgg(uint32_t now) {
   appMode = MODE_PET;
   mg.active = false;
   mg.kind = TASK_NONE;
+  clearAutoBehavior();
+  clearDailyEventQueue();
+  lastDailyEventDay = 0;
 
   uiSel = 0;
   uiSpriteDirty = true; uiForceBands = true;
@@ -4418,11 +6338,15 @@ static void resetToEgg(uint32_t now) {
 static void showHomeIntro(uint32_t now) {
   tft.fillScreen(TFT_BLACK);
 
-  int imgW = (int)pageaccueil_W;
-  int imgH = (int)pageaccueil_H;
-  int x = (SW - imgW) / 2;
-  int y = (SH - imgH) / 2;
-  tft.pushImage(x, y, imgW, imgH, pageaccueil);
+  if (!drawRuntimeSingleAssetCentered(BeansAssets::AssetId::UiScreenTitlePageAccueil)) {
+    const BeansAssets::SingleAssetRef titleScreen =
+        BeansAssets::singleAsset(BeansAssets::AssetId::UiScreenTitlePageAccueil);
+    int imgW = (int)titleScreen.w;
+    int imgH = (int)titleScreen.h;
+    int x = (SW - imgW) / 2;
+    int y = (SH - imgH) / 2;
+    tft.pushImage(x, y, imgW, imgH, titleScreen.data);
+  }
 
   setCNFontTFT();
   tft.setTextDatum(top_center);
@@ -4431,6 +6355,11 @@ static void showHomeIntro(uint32_t now) {
   tft.drawString("BeansPetGame", SW / 2, 10);
   tft.setTextSize(1);
   tft.drawString("\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe7\x85\xa7\xe6\x8a\xa4\xe7\xbb\x88\xe7\xab\xaf", SW / 2, 32);  // 罗德岛龙泡泡照护终端
+  if (bootStorageNotice[0] != 0) {
+    tft.setTextColor(bootStorageNoticeColor, TFT_BLACK);
+    tft.drawString(bootStorageNotice, SW / 2, SH - 22);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  }
   tft.setTextDatum(top_left);
   resetFontTFT();
 
@@ -4452,8 +6381,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // init storage : LittleFS (sauvegardes) + SD (futur assets)
+  // init storage : sauvegardes + auto-test SD au demarrage
   storageInit();
+  runtimeAssetsInit();
+  initAutoBehaviorTable();
+  initDailyEventTable();
 
   audioPwmSetup();
   audioSetTone(0, 0);
@@ -4570,22 +6502,7 @@ SH = tft.height();
   (void)touchReady;
 #endif
 #endif
-
-
-
-
-  worldW = (float)(2 * SW);
-  worldMin = 0.0f;
-  worldMax = worldW;
-
-  homeX = (HOME_X_MODE == 0) ? (worldW * 0.5f) : (float)(SW / 2);
-
-  bushLeftX  = 20.0f;
-  puddleX    = worldW - (float)FLAQUE_W - 20.0f;
-
-  worldX = homeX;
-  camX   = worldX - (float)(SW / 2);
-  camX = clampf(camX, 0.0f, worldW - (float)SW);
+  applySceneConfig(SCENE_DORM, false);
 
   if (encoderEnabled()) {
     lastAB = readAB();
@@ -4643,14 +6560,21 @@ SH = tft.height();
   } else {
     processOfflineSettlement(now);
   }
+  processDailyEvents(now, true);
 
   showHomeIntro(now);
   now = millis();
   if (bootOfflineNotice[0] != 0) {
-    setMsg(bootOfflineNotice, now, OFFLINE_REPORT_MS);
+    openOfflineReportModal();
   }
+  if (rtcPresent && !rtcTimeValid) {
+    if (isModalMode()) rtcPromptModal.pending = true;
+    else openRtcPromptModal();
+  }
+  if (!isModalMode()) maybeOpenPendingDailyEventModal();
 
   lastPetTick = now;
+  nextDailyEventCheckAt = now + 10000UL;
 
   rebuildUISprites(now);
   uiSpriteDirty = false;
@@ -4679,8 +6603,14 @@ void loop() {
 
   updateButtons(now);
 
+  if (rtcPresent && rtcTimeValid && (nextDailyEventCheckAt == 0 || (int32_t)(now - nextDailyEventCheckAt) >= 0)) {
+    processDailyEvents(now, false);
+    nextDailyEventCheckAt = now + 10000UL;
+  }
+  maybeOpenPendingDailyEventModal();
+
   // ================== MINI-JEUX (prioritaires) ==================
-  if (appMode != MODE_PET) {
+  if (isMiniGameMode()) {
     // debounce bouton encodeur (séparé du UI)
     static bool mgRaw = false;
     static bool mgStable = false;
@@ -4724,6 +6654,12 @@ if (ENC_BTN >= 0) raw = (digitalRead(ENC_BTN) == LOW);
   audioNextAlertAt = 0;
 }
     return; // on saute la logique gestion pendant mini-jeu
+  }
+
+  if (isModalMode()) {
+    handleModalUI(now);
+    renderGameFrame(now);
+    return;
   }
 
   // message timeout
@@ -4834,65 +6770,5 @@ if (ENC_BTN >= 0) raw = (digitalRead(ENC_BTN) == LOW);
     lastBlinkOn = blinkOn;
   }
 
-  // rebuild UI
-  if (uiSpriteDirty) {
-    uint8_t nbtn = uiButtonCount();
-    if (uiSel >= nbtn) uiSel = 0;
-    rebuildUISprites(now);
-    uiSpriteDirty = false;
-  }
-
-  // animation / rendu
-  if (phase == PHASE_ALIVE) {
-    uint8_t animId = animIdForState(pet.stage, state);
-
-    bool forceFace = false;
-    bool faceRight = false;
-    if (task.active && task.kind == TASK_HUG && task.ph == PH_DO) {
-      if (pet.stage == AGE_JUNIOR) animId = (uint8_t)triJ::ANIM_JUNIOR_AMOUR;
-      else if (pet.stage == AGE_ADULTE) animId = (uint8_t)triA::ANIM_ADULTE_AMOUR;
-      else animId = (uint8_t)triS::ANIM_SENIOR_AMOUR;
-    }
-
-    if (task.active && task.ph == PH_DO) {
-      if (task.kind == TASK_EAT) { forceFace = true; faceRight = false; }
-      if (task.kind == TASK_DRINK) { forceFace = true; faceRight = true; }
-    }
-
-    if ((int32_t)(now - nextAnimTick) >= 0) {
-      uint8_t cnt = triAnimCount(pet.stage, animId);
-      if (cnt == 0) cnt = 1;
-      animIdx = (animIdx + 1) % cnt;
-      nextAnimTick = now + frameMsForState(state);
-    }
-
-    int dinoX = (int)roundf(worldX - camX);
-    if (dinoX > DZ_R) camX = worldX - (float)DZ_R;
-    else if (dinoX < DZ_L) camX = worldX - (float)DZ_L;
-    camX = clampf(camX, 0.0f, worldW - (float)SW);
-    dinoX = (int)roundf(worldX - camX);
-
-    int dinoY = (GROUND_Y - TRI_FOOT_Y);
-
-    const uint16_t* frame = triGetFrame(pet.stage, animId, animIdx);
-
-    bool flipX = flipForMovingRight(movingRight);
-    if (forceFace) flipX = faceRight ? true : false;
-
-    uint8_t shade = 0;
-    if (pet.hygiene <= 0.0f) shade = 2;
-    else if (pet.hygiene < 20.0f) shade = 1;
-
-    tft.startWrite();
-    renderFrameOptimized(dinoX, dinoY, frame, flipX, shade);
-    uiForceBands = false;
-    tft.endWrite();
-  } else {
-    int dinoX = (int)roundf(worldX - camX);
-    int dinoY = (GROUND_Y - TRI_FOOT_Y);
-    tft.startWrite();
-    renderFrameOptimized(dinoX, dinoY, nullptr, false, 0);
-    uiForceBands = false;
-    tft.endWrite();
-  }
+  renderGameFrame(now);
 }

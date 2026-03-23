@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "domain": "scenes",
+  "group": "common",
+  "pack": "scene_common",
+  "defaults": {
+    "kind": "single",
+    "processing": {
+      "trim": true,
+      "bgRemoval": "auto"
+    }
+  },
+  "assets": [
+    {
+      "id": "scene.common.prop.mountain",
+      "source": "src/scenes/common/props/terrain/mountain/montagne.png",
+      "tags": [
+        "scene",
+        "terrain",
+        "mountain"
+      ],
+      "export": {
+        "header": "montagne.h",
+        "symbol": "montagne"
+      }
+    },
+    {
+      "id": "scene.common.prop.tree_broadleaf",
+      "source": "src/scenes/common/props/vegetation/tree_broadleaf/arbre.png",
+      "tags": [
+        "scene",
+        "vegetation",
+        "tree"
+      ],
+      "export": {
+        "header": "arbre.h",
+        "symbol": "arbre"
+      }
+    },
+    {
+      "id": "scene.common.prop.tree_pine",
+      "source": "src/scenes/common/props/vegetation/tree_pine/sapin.png",
+      "tags": [
+        "scene",
+        "vegetation",
+        "tree"
+      ],
+      "export": {
+        "header": "sapin.h",
+        "symbol": "sapin"
+      }
+    },
+    {
+      "id": "scene.common.prop.bush_berry",
+      "source": "src/scenes/common/props/vegetation/bush_berry/buisson_baie.png",
+      "tags": [
+        "scene",
+        "vegetation",
+        "bush"
+      ],
+      "export": {
+        "header": "buissonbaie.h",
+        "symbol": "buissonbaie"
+      }
+    },
+    {
+      "id": "scene.common.prop.bush_plain",
+      "source": "src/scenes/common/props/vegetation/bush_plain/buisson_sans_baie.png",
+      "tags": [
+        "scene",
+        "vegetation",
+        "bush"
+      ],
+      "export": {
+        "header": "buissonsansbaie.h",
+        "symbol": "buissonsansbaie"
+      }
+    },
+    {
+      "id": "scene.common.prop.puddle",
+      "source": "src/scenes/common/props/water/puddle/flaque_eau_60x25.png",
+      "tags": [
+        "scene",
+        "water",
+        "puddle"
+      ],
+      "export": {
+        "header": "flaque_eau_60x25.h",
+        "symbol": "flaque_eau_60x25"
+      }
+    },
+    {
+      "id": "scene.common.prop.cloud",
+      "source": "src/scenes/common/props/sky/cloud/nuage.png",
+      "tags": [
+        "scene",
+        "sky",
+        "cloud"
+      ],
+      "export": {
+        "header": "nuage.h",
+        "symbol": "nuage"
+      }
+    },
+    {
+      "id": "scene.common.prop.balloon",
+      "source": "src/scenes/common/props/decor/balloon/ballon.png",
+      "tags": [
+        "scene",
+        "decor",
+        "balloon"
+      ],
+      "export": {
+        "header": "ballon.h",
+        "symbol": "ballon"
+      }
+    }
+  ]
+}

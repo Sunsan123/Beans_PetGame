@@ -1,0 +1,273 @@
+{
+  "schemaVersion": 1,
+  "domain": "characters",
+  "group": "triceratops",
+  "pack": "character_triceratops",
+  "defaults": {
+    "kind": "animation",
+    "character": "triceratops",
+    "processing": {
+      "trim": "none",
+      "bgRemoval": "auto"
+    }
+  },
+  "assets": [
+    {
+      "id": "character.triceratops.junior.amour",
+      "animation": "Junior Amour",
+      "frames": [
+        "src/characters/triceratops/junior/amour/01.png",
+        "src/characters/triceratops/junior/amour/02.png",
+        "src/characters/triceratops/junior/amour/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/junior/source/triceratops_junior.aseprite",
+      "export": {
+        "header": "annim_junior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.junior.sit",
+      "animation": "Junior Assie",
+      "frames": [
+        "src/characters/triceratops/junior/assie/01.png",
+        "src/characters/triceratops/junior/assie/02.png",
+        "src/characters/triceratops/junior/assie/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/junior/source/triceratops_junior.aseprite",
+      "export": {
+        "header": "annim_junior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.junior.blink",
+      "animation": "Junior Cligne",
+      "frames": [
+        "src/characters/triceratops/junior/cligne/01.png",
+        "src/characters/triceratops/junior/cligne/02.png",
+        "src/characters/triceratops/junior/cligne/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/junior/source/triceratops_junior.aseprite",
+      "export": {
+        "header": "annim_junior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.junior.sleep",
+      "animation": "Junior dodo",
+      "frames": [
+        "src/characters/triceratops/junior/dodo/01.png",
+        "src/characters/triceratops/junior/dodo/02.png",
+        "src/characters/triceratops/junior/dodo/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/junior/source/triceratops_junior.aseprite",
+      "export": {
+        "header": "annim_junior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.junior.eat",
+      "animation": "Junior Mange",
+      "frames": [
+        "src/characters/triceratops/junior/mange/01.png",
+        "src/characters/triceratops/junior/mange/02.png",
+        "src/characters/triceratops/junior/mange/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/junior/source/triceratops_junior.aseprite",
+      "export": {
+        "header": "annim_junior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.junior.walk",
+      "animation": "Junior Marche",
+      "frames": [
+        "src/characters/triceratops/junior/marche/01.png",
+        "src/characters/triceratops/junior/marche/02.png",
+        "src/characters/triceratops/junior/marche/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/junior/source/triceratops_junior.aseprite",
+      "export": {
+        "header": "annim_junior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.adult.amour",
+      "animation": "Adulte Amour",
+      "frames": [
+        "src/characters/triceratops/adult/amour/01.png",
+        "src/characters/triceratops/adult/amour/02.png",
+        "src/characters/triceratops/adult/amour/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/adult/source/triceratops_adult.aseprite",
+      "export": {
+        "header": "annim_adul.h"
+      }
+    },
+    {
+      "id": "character.triceratops.adult.sit",
+      "animation": "Adulte Assie",
+      "frames": [
+        "src/characters/triceratops/adult/assie/01.png",
+        "src/characters/triceratops/adult/assie/02.png",
+        "src/characters/triceratops/adult/assie/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/adult/source/triceratops_adult.aseprite",
+      "export": {
+        "header": "annim_adul.h"
+      }
+    },
+    {
+      "id": "character.triceratops.adult.blink",
+      "animation": "Adulte Cligne",
+      "frames": [
+        "src/characters/triceratops/adult/cligne/01.png",
+        "src/characters/triceratops/adult/cligne/02.png",
+        "src/characters/triceratops/adult/cligne/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/adult/source/triceratops_adult.aseprite",
+      "export": {
+        "header": "annim_adul.h"
+      }
+    },
+    {
+      "id": "character.triceratops.adult.sleep",
+      "animation": "Adulte dodo",
+      "frames": [
+        "src/characters/triceratops/adult/dodo/01.png",
+        "src/characters/triceratops/adult/dodo/02.png",
+        "src/characters/triceratops/adult/dodo/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/adult/source/triceratops_adult.aseprite",
+      "export": {
+        "header": "annim_adul.h"
+      }
+    },
+    {
+      "id": "character.triceratops.adult.eat",
+      "animation": "Adulte Mange",
+      "frames": [
+        "src/characters/triceratops/adult/mange/01.png",
+        "src/characters/triceratops/adult/mange/02.png",
+        "src/characters/triceratops/adult/mange/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/adult/source/triceratops_adult.aseprite",
+      "export": {
+        "header": "annim_adul.h"
+      }
+    },
+    {
+      "id": "character.triceratops.adult.walk",
+      "animation": "Adulte Marche",
+      "frames": [
+        "src/characters/triceratops/adult/marche/01.png",
+        "src/characters/triceratops/adult/marche/02.png",
+        "src/characters/triceratops/adult/marche/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/adult/source/triceratops_adult.aseprite",
+      "export": {
+        "header": "annim_adul.h"
+      }
+    },
+    {
+      "id": "character.triceratops.senior.amour",
+      "animation": "Senior Amour",
+      "frames": [
+        "src/characters/triceratops/senior/amour/01.png",
+        "src/characters/triceratops/senior/amour/02.png",
+        "src/characters/triceratops/senior/amour/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/senior/source/triceratops_senior.aseprite",
+      "export": {
+        "header": "annim_senior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.senior.sit",
+      "animation": "Senior Assie",
+      "frames": [
+        "src/characters/triceratops/senior/assie/01.png",
+        "src/characters/triceratops/senior/assie/02.png",
+        "src/characters/triceratops/senior/assie/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/senior/source/triceratops_senior.aseprite",
+      "export": {
+        "header": "annim_senior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.senior.blink",
+      "animation": "Senior Cligne",
+      "frames": [
+        "src/characters/triceratops/senior/cligne/01.png",
+        "src/characters/triceratops/senior/cligne/02.png",
+        "src/characters/triceratops/senior/cligne/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/senior/source/triceratops_senior.aseprite",
+      "export": {
+        "header": "annim_senior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.senior.sleep",
+      "animation": "Senior dodo",
+      "frames": [
+        "src/characters/triceratops/senior/dodo/01.png",
+        "src/characters/triceratops/senior/dodo/02.png",
+        "src/characters/triceratops/senior/dodo/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/senior/source/triceratops_senior.aseprite",
+      "export": {
+        "header": "annim_senior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.senior.eat",
+      "animation": "Senior Mange",
+      "frames": [
+        "src/characters/triceratops/senior/mange/01.png",
+        "src/characters/triceratops/senior/mange/02.png",
+        "src/characters/triceratops/senior/mange/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/senior/source/triceratops_senior.aseprite",
+      "export": {
+        "header": "annim_senior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.senior.walk",
+      "animation": "Senior Marche",
+      "frames": [
+        "src/characters/triceratops/senior/marche/01.png",
+        "src/characters/triceratops/senior/marche/02.png",
+        "src/characters/triceratops/senior/marche/03.png"
+      ],
+      "sourceAseprite": "src/characters/triceratops/senior/source/triceratops_senior.aseprite",
+      "export": {
+        "header": "annim_senior.h"
+      }
+    },
+    {
+      "id": "character.triceratops.egg.hatch",
+      "character": "dino",
+      "animation": "oeuf",
+      "frames": [
+        "src/characters/triceratops/egg/hatch/01.png",
+        "src/characters/triceratops/egg/hatch/02.png",
+        "src/characters/triceratops/egg/hatch/03.png",
+        "src/characters/triceratops/egg/hatch/04.png"
+      ],
+      "tags": [
+        "character",
+        "triceratops",
+        "egg"
+      ],
+      "processing": {
+        "trim": "none",
+        "bgRemoval": "auto"
+      },
+      "export": {
+        "header": "annim_oeuf.h"
+      }
+    }
+  ]
+}

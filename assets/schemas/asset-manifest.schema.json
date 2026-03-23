@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "beanspetgame://assets/asset-manifest.schema.json",
+  "title": "BeansPetGame Asset Manifest",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "domain",
+    "group",
+    "pack",
+    "assets"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "domain": {
+      "type": "string"
+    },
+    "group": {
+      "type": "string"
+    },
+    "pack": {
+      "type": "string"
+    },
+    "defaults": {
+      "type": "object"
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "export"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "single",
+              "animation"
+            ]
+          },
+          "pack": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source": {
+            "type": "string"
+          },
+          "sourceAseprite": {
+            "type": "string"
+          },
+          "frames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "character": {
+            "type": "string"
+          },
+          "animation": {
+            "type": "string"
+          },
+          "processing": {
+            "type": "object",
+            "properties": {
+              "trim": {
+                "oneOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "enum": [
+                      "none",
+                      "union"
+                    ]
+                  }
+                ]
+              },
+              "bgRemoval": {
+                "enum": [
+                  "auto",
+                  "never"
+                ]
+              }
+            }
+          },
+          "export": {
+            "type": "object",
+            "required": [
+              "header"
+            ],
+            "properties": {
+              "header": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "project": "BeansPetGame",
+  "manifestRoot": "manifests",
+  "sourceRoot": "src",
+  "buildRoot": "build",
+  "manifests": [
+    "manifests/ui/core.json",
+    "manifests/scenes/common.json",
+    "manifests/props/gameplay.json",
+    "manifests/characters/triceratops.json"
+  ],
+  "targets": {
+    "staging_headers": {
+      "type": "arduino_headers",
+      "outDir": "build/generated_headers"
+    },
+    "runtime_bundles": {
+      "type": "runtime_bundle",
+      "outDir": "build/runtime"
+    },
+    "sprites_compat_headers": {
+      "type": "arduino_headers",
+      "outDir": "../Sprites/generated_headers"
+    },
+    "legacy_headers": {
+      "type": "arduino_headers",
+      "outDir": "../arduino/JurassicLifeCN"
+    }
+  }
+}

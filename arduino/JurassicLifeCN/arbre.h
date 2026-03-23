@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-// Auto-generated: single image -> RGB565 (KEY transparency)
+// Auto-generated from assets manifest: single image -> RGB565 (KEY transparency)
 
 static const uint16_t arbre_W = 39;
 static const uint16_t arbre_H = 73;

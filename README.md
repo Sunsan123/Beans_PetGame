@@ -1,144 +1,146 @@
 # BeansPetGame
 
-BeansPetGame 是一款**龙泡泡养成放置游戏**，运行在**带屏幕的 ESP32** 上。  
-它就安静地待在你桌上（或者做个外壳揣兜里也行），一通电就能继续它的小日子。
+BeansPetGame 是一个运行在 ESP32 小屏设备上的龙泡泡养成放置游戏。当前中文主线版本采用“博士在罗德岛照顾龙泡泡”的世界观语境，主程序位于 [arduino/JurassicLifeCN](C:\Users\17787\Desktop\Beans_PetGame\arduino\JurassicLifeCN)。
 
-玩法很简单：
-- 照顾你的小恐龙，
-- 看着它成长进化，
-- 确保它不会一辈子都在……拉粑粑。💩
+## 当前版本
 
-> 你可以**直接开玩**……也可以**随意魔改**：精灵图、动画、界面、规则、引脚等等。  
-> 总之：就是让你尽情折腾用的。
+- 主属性保留 6 项：`饱腹 / 水分 / 疲劳 / 卫生 / 心情 / 亲密`
+- 主交互保留 7 项：`休息 / 喂食 / 喝水 / 洗澡 / 玩耍 / 清理 / 互动`
+- 中文 UI 已切换到 `Bean / 龙泡泡 / 博士 / 罗德岛` 语境
+- 已接入 `DS3231 RTC` 自动探测、离线待机结算、RTC 未校时入口、离岗报告弹窗
+- 已接入 `龙门币` 货币系统，在线与离线都会随时间增长，离线结算上限 24 小时
+- 已接入场景切换系统，默认场景为 `宿舍`，当前可切到 `活动室 / 甲板`
+- 已接入自动行为池，支持行为名、动作素材、气泡文案、时长配置
+- 已接入每日事件系统，支持每天 1 到 3 个事件、在线弹窗和离线补发提醒
 
----
+## 策划配置方式
 
-## ▶️ 视频演示
-[![BeansPetGame – YouTube 演示](https://img.youtube.com/vi/RPLaATQ_HNw/hqdefault.jpg)](https://youtu.be/RPLaATQ_HNw)
+现在不再使用 CSV，也不再依赖预编译生成。
 
----
+策划只需要直接维护两个头文件：
 
-## 📌 目录
-1. BeansPetGame 是什么？
-2. 支持的硬件（即插即用）
-3. 安装/烧录（简单版）
-4. DIY 模式（自己搭建）
-5. 动作展示（GIF）
-6. 存档（需要 microSD 卡）
-7. 自定义精灵图/动画
-8. 仓库结构
+- 行为表：[AutoBehaviorTableCN.h](C:\Users\17787\Desktop\Beans_PetGame\arduino\JurassicLifeCN\AutoBehaviorTableCN.h)
+- 每日事件表：[DailyEventTableCN.h](C:\Users\17787\Desktop\Beans_PetGame\arduino\JurassicLifeCN\DailyEventTableCN.h)
 
----
+这两个文件都采用“数组表”格式，字段名固定，注释写在文件顶部，非程序人员也可以直接照着改。
 
-## 1) BeansPetGame 是什么？
-一个照顾恐龙的小游戏/电子伙伴：
-- 给它喂食 🍖
-- 给它喝水 💧
-- 给它洗澡 🧼
-- 跟它玩耍 🎮
-- 给它抱抱 💖
-- 以及……处理**"拉粑粑"的时刻**（没错，这也是你的工作）。
+### 行为表字段
 
----
+`enabled, weight, behavior, moveMode, art, bubbleText, minMs, maxMs`
 
-## 2) ✅ 支持的硬件（即插即用）
-BeansPetGame 的设计目标是**非常容易烧录**，只要你有支持的开发板：
+- `enabled`：是否启用
+- `weight`：抽取权重
+- `behavior`：行为名称
+- `moveMode`：`AUTO_MOVE_IDLE` 或 `AUTO_MOVE_WALK`
+- `art`：`AUTO_ART_AUTO / AUTO_ART_MARCHE / AUTO_ART_ASSIE / AUTO_ART_CLIGNE / AUTO_ART_DODO / AUTO_ART_AMOUR / AUTO_ART_MANGE`
+- `bubbleText`：气泡文案，多条候选用 `|` 分隔
+- `minMs / maxMs`：行为持续时间，单位毫秒
 
-- **2432S022**
-- **2432S028**
-- **经典 ESP32 + ILI9341 320×240 屏幕**（DIY 配置）
+### 每日事件表字段
 
-👉 使用支持的开发板：在代码里选好对应的配置文件，烧录，搞定。
+`enabled, weight, eventName, art, summary, deltaFaim, deltaSoif, deltaFatigue, deltaHygiene, deltaHumeur, deltaAmour, deltaSante`
 
----
+- `enabled`：是否启用
+- `weight`：抽取权重
+- `eventName`：事件标题
+- `art`：事件弹窗对应素材
+- `summary`：事件描述
+- `delta*`：对属性或健康的收益/损失
 
-## 3) ⬆️ 安装/烧录（简单版）
-Arduino 代码在这里：
-- `arduino/JurassicLifeCN/`
+## RTC 与离线待机
 
-配置说明（开发板、音频、引脚、编码器/按钮……）的 README 在这里：
-- `arduino/JurassicLifeCN/README.md`
+当前实现为 `RTC-ready` 架构，推荐硬件为 `DS3231`。
 
-➡️ 简单来说：修改文件顶部的几行 `#define`，然后用 Arduino IDE **烧录**即可。
+已支持：
 
----
+- 启动时自动探测 RTC
+- 读取真实时间并执行离线结算
+- RTC 时间无效时跳过离线结算，不影响正常进入游戏
+- RTC 未校时时自动弹出校时入口
+- 开机显示“博士离岗报告”
 
-## 4) 🧪 DIY 模式（自己搭建）
-你也可以自己搭建硬件：
-- 你自己的 ESP32
-- 你自己的 ILI9341 320×240 屏幕
-- 你自己的按钮/编码器
-- 你自己的 3D 打印外壳
-- 你自己的自定义精灵图
+离线结算会覆盖：
 
-这个项目本身就是一个**有趣的基础平台**，你可以随心所欲地改造它。
+- 主属性自然流逝
+- 休整中的疲劳恢复
+- 健康惩罚
+- 成长推进
+- 补给点与饮水站刷新
+- 虚弱 / 离岛 / 记录完成判定
 
----
+## 场景切换
 
-## 5) 🎬 动作展示（GIF 预览）
+当前第一版已支持 3 个场景：
 
-> 这里展示的是"日常生活"部分。  
-> 你的小恐龙不复杂……但它有需求。（跟我们一样。）
+- `宿舍`
+- `活动室`
+- `甲板`
 
-### 🍖 吃东西
-饿的时候，它会用"我已经三分钟没吃东西了"的眼神看着你。
+规则说明：
 
-![恐龙吃东西](screenshots/DinoMange.gif)
+- 新档和老档升级后默认进入 `宿舍`
+- 场景会写入存档，重启后会恢复到上次所在场景
+- 切换场景后，会同步切换背景风格、补给点位置、饮水点位置和场景名称显示
+- 当前第一版不包含场景专属收益倍率、场景专属行为池、场景专属事件池
 
-### 💧 喝水
-补水 = 快乐恐龙。快乐的恐龙不会那么折腾你。
+切换方式：
 
-![恐龙喝水](screenshots/Dinoboit.gif)
+- 触屏设备：点击底栏最左或最右的场景箭头
+- 三按键设备：当底栏选中最左或最右交互位后，继续按 `LEFT / RIGHT` 切换上一场景或下一场景
 
-### 🧼 洗澡
-因为嘛……在某些活动之后，恐龙确实需要清洁一下。
+## 主要目录
 
-![恐龙洗澡](screenshots/Dinolave.gif)
+- [arduino/JurassicLifeCN](C:\Users\17787\Desktop\Beans_PetGame\arduino\JurassicLifeCN)：中文主程序
+- [JurassicLifeCN.ino](C:\Users\17787\Desktop\Beans_PetGame\arduino\JurassicLifeCN\JurassicLifeCN.ino)：当前主入口
+- [README.md](C:\Users\17787\Desktop\Beans_PetGame\arduino\JurassicLifeCN\README.md)：Arduino、板型、RTC、配置表说明
+- [screenshots](C:\Users\17787\Desktop\Beans_PetGame\screenshots)：演示图和录屏素材
 
-### 🎮 玩耍
-恐龙需要发泄精力。不然它会开始胡思乱想。一只胡思乱想的恐龙……很可疑。
+## 快速开始
 
-![恐龙玩耍](screenshots/Dinojoue.gif)
+1. 打开 [JurassicLifeCN.ino](C:\Users\17787\Desktop\Beans_PetGame\arduino\JurassicLifeCN\JurassicLifeCN.ino)
+2. 选择板型和音频配置
+3. 烧录到设备
+4. 如需真实离线待机，再接入 `DS3231 RTC`
+5. 如需调自动行为和每日事件，直接编辑两个 `.h` 配置表
 
-### 💩 拉粑粑
-本项目最崇高的部分：粑粑管理。  
-不要嫌弃它。帮帮它。这是你的恐龙。
+## 备注
 
-![恐龙拉粑粑](screenshots/Dinocaca.gif)
+- 仓库里仍保留一些历史命名，例如 `JurassicLifeCN.ino` 和部分 `Dino` 内部变量名；玩家可见品牌和世界观已切到 `BeansPetGame`
+- 本机当前没有 `arduino-cli`，最近几次修改主要做了静态检查，未做本地完整编译验证
 
-### 💖 抱抱
-提振士气的秘密武器：一个拥抱。  
-（没错，对恐龙也管用。）
+## RTC 调试说明
 
-![恐龙抱抱](screenshots/Dinocalins.gif)
+仓库里现在额外提供了一个独立的 `DS3231` 测试草图：
 
----
+- [RTC_DS3231_Test.ino](C:\Users\17787\Desktop\Beans_PetGame\arduino\RTC_DS3231_Test\RTC_DS3231_Test.ino)
 
-## 6) 💾 存档：需要 microSD 卡
-如果你想在**断电后**还能找回你的恐龙：
-➡️ 你需要一张 **microSD 卡**。
+用途：
 
-没有 microSD = 重启后没有持久化存档。
+- 单独验证 RTC 是否接通
+- 单独验证 RTC 是否真的在走时
+- 区分“未检测到模块”和“RTC 已接上但时间无效”
 
----
+当前默认按 `ESP32-S3_ST7789` 这套接线测试：
 
-## 7) 🎨 自定义精灵图/动画
-想要你自己的恐龙？你自己的风格？你自己的场景？
-所有关于精灵图/动画以及 `.h` 转换脚本的内容都在这里：
-- `Sprites/`
+- `SDA -> GPIO9`
+- `SCL -> GPIO10`
+- `VCC -> 3.3V`
+- `GND -> GND`
 
-里面有一个 README 说明如何创建精灵图并生成 `.h` 文件。
+使用方法：
 
----
+1. 单独烧录 `RTC_DS3231_Test.ino`
+2. 打开串口监视器，波特率设为 `115200`
+3. 观察是否扫描到 `0x68`
+4. 观察是否最终输出 `PASS: RTC is connected and ticking.`
 
-## 8) 🗂️ 仓库结构（快速一览）
-- `arduino/` ：Arduino 代码（项目核心）
-- `Sprites/` ：精灵图 + `.h` 转换脚本
-- `3DSTL/` ：可打印的外壳/零件
-- `screenshots/` ：截图 + 接线图 + GIF
-- `Modifencours/` ：测试 / 进行中的修改
-- `archive/` ：旧版/历史存档（如果有的话）
+串口命令：
 
----
+- `r`：重新执行一次测试
+- `s`：把 RTC 设置为编译时间后再重测
 
-🦖 尽情玩耍、折腾、定制……好好照顾你的小恐龙（就算它在拉粑粑的时候也要）。
+补充说明：
+
+- 扫描到 `0x68` 表示 `DS3231` 在线
+- 同时扫描到 `0x57` 也正常，通常是模块板上的 `AT24C32 EEPROM`
+- 主游戏现在也已补充 RTC 启动重试，并把“未检测到模块”和“RTC 时间无效”分成两种提示

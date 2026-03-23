@@ -40,6 +40,7 @@
 #ifndef LGFX_USE_V1
 #define LGFX_USE_V1
 #endif
+#include <hal/spi_types.h>
 #include <LovyanGFX.hpp>
 
 // ---- 屏幕引脚 (匹配用户已验证的 TFT_eSPI 接线) ----
@@ -83,7 +84,7 @@ public:
   LGFX_ESP32S3_ST7789() {
     { // ---- SPI 总线 ----
       auto cfg = _bus.config();
-      cfg.spi_host   = SPI2_HOST;     // ESP32-S3 使用 SPI2_HOST (无 VSPI_HOST)
+      cfg.spi_host   = SPI2_HOST;   // ESP32-S3 TFT must use GPSPI2; FSPI macro value 0 maps to SPI1_HOST
       cfg.spi_mode   = 0;
       cfg.freq_write = 40000000;      // ST7789 SPI 最高可达 80MHz, 40MHz 稳定
       cfg.freq_read  = 16000000;

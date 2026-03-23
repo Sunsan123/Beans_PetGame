@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "beanspetgame://assets/catalog.schema.json",
+  "title": "BeansPetGame Asset Catalog",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "project",
+    "sourceRoot",
+    "buildRoot",
+    "manifests",
+    "targets"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "project": {
+      "type": "string"
+    },
+    "manifestRoot": {
+      "type": "string"
+    },
+    "sourceRoot": {
+      "type": "string"
+    },
+    "buildRoot": {
+      "type": "string"
+    },
+    "manifests": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "type",
+          "outDir"
+        ],
+        "properties": {
+          "type": {
+            "enum": [
+              "arduino_headers",
+              "runtime_bundle"
+            ]
+          },
+          "outDir": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

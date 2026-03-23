@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 
-// Auto-generated: anim folder 'annim_caca' -> RGB565 (KEY transparency)
+// Auto-generated from assets manifest: animation set 'annim_caca.h' -> RGB565 (KEY transparency)
 // KEY (RGB565): 0xF81F
 
 namespace dino {

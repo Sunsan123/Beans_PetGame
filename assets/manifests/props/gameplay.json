@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "domain": "props",
+  "group": "gameplay",
+  "pack": "props_gameplay",
+  "defaults": {
+    "processing": {
+      "bgRemoval": "auto"
+    }
+  },
+  "assets": [
+    {
+      "id": "prop.gameplay.grave_marker",
+      "kind": "single",
+      "source": "src/props/gameplay/grave_marker/tombe.png",
+      "tags": [
+        "prop",
+        "gameplay",
+        "grave"
+      ],
+      "processing": {
+        "trim": true,
+        "bgRemoval": "auto"
+      },
+      "export": {
+        "header": "tombe.h",
+        "symbol": "tombe"
+      }
+    },
+    {
+      "id": "prop.gameplay.waste.default",
+      "kind": "animation",
+      "character": "dino",
+      "animation": "caca",
+      "frames": [
+        "src/props/gameplay/waste/default/01.png",
+        "src/props/gameplay/waste/default/02.png",
+        "src/props/gameplay/waste/default/03.png"
+      ],
+      "tags": [
+        "prop",
+        "gameplay",
+        "waste"
+      ],
+      "processing": {
+        "trim": "none",
+        "bgRemoval": "auto"
+      },
+      "export": {
+        "header": "annim_caca.h"
+      }
+    }
+  ]
+}
