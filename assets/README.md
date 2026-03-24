@@ -25,7 +25,7 @@ Recommended domain layout under `src/`:
 
 - Source files are organized for humans.
 - Runtime and build tooling should use stable `id` values, not filenames.
-- `export` describes legacy outputs such as Arduino headers. It is a compatibility layer, not the logical identity of an asset.
+- `export` is retained only as historical metadata for migrated assets. Runtime code does not depend on generated headers anymore.
 - `pack` groups assets for future runtime bundles. It does not need to match folders.
 
 ID convention:
@@ -45,14 +45,9 @@ Examples:
 
 `tools/asset_pipeline/build_assets.py` reads `assets/catalog.json`, then loads each domain manifest and builds any requested targets.
 
-Current targets:
+Current target:
 
-- `staging_headers`: writes generated `.h` files under `assets/build/generated_headers`
 - `runtime_bundles`: writes runtime pack/index output under `assets/build/runtime`
-- `sprites_compat_headers`: writes compatibility output under `Sprites/generated_headers`
-- `legacy_headers`: regenerates `.h` sprite headers for `arduino/JurassicLifeCN`
-
-The legacy header target keeps the current game code working while the repository moves toward a runtime asset manager.
 
 Runtime bundle layout:
 
@@ -62,23 +57,33 @@ assets/build/runtime/
   packs/
     <pack>.bpk
   index/
-    <pack>.json
+    <pack>.bix
 ```
 
 - `packs/<pack>.bpk`: RGB565 payload blobs with a small binary header
-- `index/<pack>.json`: per-pack asset metadata used by the ESP32-side runtime loader
+- `index/<pack>.bix`: per-pack binary metadata index used by the ESP32-side runtime loader
 - `manifest.json`: top-level list of runtime packs and file locations
 
-See `assets/docs/runtime-pack-format.md` for the binary and JSON format contract.
+See `assets/docs/runtime-pack-format.md` for the binary pack/index format contract.
 
 Device-side deployment path:
 
 - copy the contents of `assets/build/runtime/` to `/assets/runtime/` on the target SD card or LittleFS volume
-- the first runtime integration currently tries this path for the title screen and falls back to legacy headers if files are missing
+- the Arduino runtime now depends on this path directly; there is no legacy header fallback in the main game path
 - current runtime integration scope:
-  - single-image path: title screen and scene static props used by rendering
-  - animation path: egg hatch frames and gameplay waste frames
+  - single-image path: all current single-image art is runtime-driven
+  - animation path: all current animated art is runtime-driven, including triceratops state animations, egg hatch frames, and gameplay waste frames
   - cache policy: single-image runtime assets stay resident after first load; animation frames use a small LRU cache on device
+
+One-click SD export on Windows:
+
+```powershell
+.\tools\export_runtime_to_sd.cmd
+```
+
+- the script is interactive now: it rebuilds runtime bundles, then asks for an SD root or local export folder
+- if exactly one removable drive is mounted, pressing Enter exports directly to `<drive>\assets\runtime\`
+- if you want a staging directory instead of a live SD card, enter a local path such as `C:\temp\sd_export`
 
 ## Validation And Reporting
 
@@ -90,7 +95,7 @@ python Sprites\build_sprites.py
 ```
 
 - `--check`: validates catalog/manifests and writes `assets/build/report.json` without generating headers
-- default build: validates first, then regenerates all configured targets and updates `assets/build/report.json`
+- default build: validates first, then regenerates runtime bundles and updates `assets/build/report.json`
 
 The report captures:
 

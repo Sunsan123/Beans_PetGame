@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+import shutil
 import struct
 from collections import Counter, defaultdict, deque
 from copy import deepcopy
@@ -20,6 +21,13 @@ REPORT_PATH = "build/report.json"
 PACK_MAGIC = b"BPK1"
 PACK_VERSION = 1
 PACK_HEADER_SIZE = 32
+INDEX_MAGIC = b"BIX1"
+INDEX_VERSION = 1
+INDEX_HEADER_SIZE = 32
+INDEX_ASSET_RECORD_SIZE = 24
+INDEX_FRAME_RECORD_SIZE = 12
+INDEX_KIND_SINGLE = 1
+INDEX_KIND_ANIMATION = 2
 
 
 def repo_root() -> Path:
@@ -731,12 +739,110 @@ def write_pack_header(file_obj, asset_count: int, payload_bytes: int):
     file_obj.write(header)
 
 
+def build_binary_pack_index_bytes(asset_entries):
+    frame_entries = []
+    for entry in asset_entries:
+        if entry["kind"] == INDEX_KIND_ANIMATION:
+            frame_entries.extend(entry["frames"])
+
+    string_base_offset = (
+        INDEX_HEADER_SIZE
+        + len(asset_entries) * INDEX_ASSET_RECORD_SIZE
+        + len(frame_entries) * INDEX_FRAME_RECORD_SIZE
+    )
+
+    string_table = bytearray()
+    string_offsets = {}
+
+    def intern_string(value: str) -> int:
+        if value in string_offsets:
+            return string_offsets[value]
+        offset = string_base_offset + len(string_table)
+        encoded = value.encode("utf-8") + b"\x00"
+        string_offsets[value] = offset
+        string_table.extend(encoded)
+        return offset
+
+    asset_blob = bytearray()
+    frame_blob = bytearray()
+    next_frame_index = 0
+
+    for entry in asset_entries:
+        id_offset = intern_string(entry["id"])
+        if entry["kind"] == INDEX_KIND_SINGLE:
+            asset_blob.extend(
+                struct.pack(
+                    "<IHHHHHHII",
+                    id_offset,
+                    INDEX_KIND_SINGLE,
+                    0,
+                    entry["key565"],
+                    entry["width"],
+                    entry["height"],
+                    0,
+                    entry["payloadOffset"],
+                    entry["payloadLength"],
+                )
+            )
+        elif entry["kind"] == INDEX_KIND_ANIMATION:
+            frames = entry["frames"]
+            asset_blob.extend(
+                struct.pack(
+                    "<IHHHHHHII",
+                    id_offset,
+                    INDEX_KIND_ANIMATION,
+                    0,
+                    entry["key565"],
+                    entry["width"],
+                    entry["height"],
+                    len(frames),
+                    next_frame_index,
+                    0,
+                )
+            )
+            for frame in frames:
+                frame_blob.extend(
+                    struct.pack(
+                        "<HHII",
+                        frame["width"],
+                        frame["height"],
+                        frame["payloadOffset"],
+                        frame["payloadLength"],
+                    )
+                )
+            next_frame_index += len(frames)
+        else:
+            raise RuntimeError(f"Unsupported binary index kind: {entry['kind']}")
+
+    header = struct.pack(
+        "<4sHHIIIIII",
+        INDEX_MAGIC,
+        INDEX_VERSION,
+        INDEX_HEADER_SIZE,
+        len(asset_entries),
+        len(frame_entries),
+        INDEX_ASSET_RECORD_SIZE,
+        INDEX_FRAME_RECORD_SIZE,
+        string_base_offset,
+        0,
+    )
+
+    return header + bytes(asset_blob) + bytes(frame_blob) + bytes(string_table)
+
+
 def build_runtime_bundles(assets, out_dir: Path):
     outputs = []
     packs_dir = out_dir / "packs"
     index_dir = out_dir / "index"
+    if packs_dir.exists():
+        shutil.rmtree(packs_dir)
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
     packs_dir.mkdir(parents=True, exist_ok=True)
     index_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = out_dir / "manifest.json"
+    if manifest_path.exists():
+        manifest_path.unlink()
 
     grouped_assets = defaultdict(list)
     for asset in assets:
@@ -747,7 +853,7 @@ def build_runtime_bundles(assets, out_dir: Path):
     for pack_id in sorted(grouped_assets.keys()):
         pack_assets = sorted(grouped_assets[pack_id], key=lambda asset: asset["id"])
         pack_path = packs_dir / f"{pack_id}.bpk"
-        index_path = index_dir / f"{pack_id}.json"
+        index_path = index_dir / f"{pack_id}.bix"
         asset_entries = []
         warning_seen = False
 
@@ -770,16 +876,12 @@ def build_runtime_bundles(assets, out_dir: Path):
                     asset_entries.append(
                         {
                             "id": asset["id"],
-                            "kind": "single",
-                            "pixelFormat": "rgb565",
+                            "kind": INDEX_KIND_SINGLE,
                             "key565": processed["key565"],
                             "width": processed["width"],
                             "height": processed["height"],
                             "payloadOffset": payload_offset,
                             "payloadLength": len(payload),
-                            "pack": pack_id,
-                            "source": asset.get("source"),
-                            "tags": asset.get("tags", []),
                         }
                     )
                 elif kind == "animation":
@@ -808,17 +910,11 @@ def build_runtime_bundles(assets, out_dir: Path):
                     asset_entries.append(
                         {
                             "id": asset["id"],
-                            "kind": "animation",
-                            "pixelFormat": "rgb565",
+                            "kind": INDEX_KIND_ANIMATION,
                             "key565": processed["key565"],
                             "width": processed["width"],
                             "height": processed["height"],
-                            "frameCount": len(frame_entries),
                             "frames": frame_entries,
-                            "pack": pack_id,
-                            "character": asset.get("character"),
-                            "animation": asset.get("animation"),
-                            "tags": asset.get("tags", []),
                         }
                     )
                 else:
@@ -827,15 +923,7 @@ def build_runtime_bundles(assets, out_dir: Path):
             payload_bytes = pack_file.tell() - PACK_HEADER_SIZE
             write_pack_header(pack_file, len(asset_entries), payload_bytes)
 
-        pack_index = {
-            "schemaVersion": 1,
-            "packFormatVersion": PACK_VERSION,
-            "packId": pack_id,
-            "packFile": f"packs/{pack_id}.bpk",
-            "assetCount": len(asset_entries),
-            "assets": asset_entries,
-        }
-        index_path.write_text(json.dumps(pack_index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        index_path.write_bytes(build_binary_pack_index_bytes(asset_entries))
 
         outputs.append(rel_repo_path(pack_path))
         outputs.append(rel_repo_path(index_path))
@@ -843,14 +931,13 @@ def build_runtime_bundles(assets, out_dir: Path):
             {
                 "packId": pack_id,
                 "packFile": f"packs/{pack_id}.bpk",
-                "indexFile": f"index/{pack_id}.json",
+                "indexFile": f"index/{pack_id}.bix",
                 "assetCount": len(asset_entries),
             }
         )
 
         print(f"[PACK OK] {pack_id}" + (" [warn]" if warning_seen else ""))
 
-    manifest_path = out_dir / "manifest.json"
     manifest_payload = {
         "schemaVersion": 1,
         "packFormatVersion": PACK_VERSION,

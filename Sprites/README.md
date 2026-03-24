@@ -8,6 +8,5 @@ This folder remains only for compatibility:
 
 - `build_sprites.py`: wrapper entrypoint for the new asset pipeline
 - `build_sprites.exe`: existing packaged builder entrypoint
-- `generated_headers/`: compatibility output written by the new pipeline
 
 Do not add new source art under `Sprites/`.

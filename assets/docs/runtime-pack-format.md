@@ -20,13 +20,13 @@ assets/build/runtime/
     props_gameplay.bpk
     character_triceratops.bpk
   index/
-    ui_core.json
-    scene_common.json
-    props_gameplay.json
-    character_triceratops.json
+    ui_core.bix
+    scene_common.bix
+    props_gameplay.bix
+    character_triceratops.bix
 ```
 
-`manifest.json` is the global directory. Each pack has one binary payload file and one JSON index file.
+`manifest.json` is the global directory. Each pack has one binary payload file and one binary index file.
 
 ## Binary Pack File
 
@@ -56,66 +56,52 @@ Version 1 payload rules:
 - transparent pixels are already converted to the asset's `key565`
 - single-image assets store one RGB565 blob
 - animation assets store one RGB565 blob per frame
-- pack files do not contain an internal directory yet; lookup is driven by the JSON index
+- pack files do not contain an internal directory yet; lookup is driven by the binary index
 
-## Per-Pack JSON Index
+## Per-Pack Binary Index
 
-Each pack has a JSON index file under `index/<pack>.json`.
+Each pack has a binary index file under `index/<pack>.bix`.
 
-Example single asset entry:
+Index header layout, 32 bytes total:
 
-```json
-{
-  "id": "scene.common.prop.cloud",
-  "kind": "single",
-  "pixelFormat": "rgb565",
-  "key565": 63519,
-  "width": 64,
-  "height": 28,
-  "payloadOffset": 32,
-  "payloadLength": 3584
-}
+```text
+0x00  char[4]   magic             = "BIX1"
+0x04  uint16    version           = 1
+0x06  uint16    headerSize        = 32
+0x08  uint32    assetCount
+0x0C  uint32    frameCount
+0x10  uint32    assetRecordSize   = 24
+0x14  uint32    frameRecordSize   = 12
+0x18  uint32    stringTableOffset
+0x1C  uint32    flags             = 0
 ```
 
-Example animation entry:
+Asset records are fixed-width and start immediately after the header.
 
-```json
-{
-  "id": "character.triceratops.junior.walk",
-  "kind": "animation",
-  "pixelFormat": "rgb565",
-  "key565": 63519,
-  "width": 96,
-  "height": 96,
-  "frameCount": 3,
-  "frames": [
-    { "index": 0, "payloadOffset": 32, "payloadLength": 18432 },
-    { "index": 1, "payloadOffset": 18464, "payloadLength": 18432 },
-    { "index": 2, "payloadOffset": 36896, "payloadLength": 18432 }
-  ]
-}
+Asset record layout, 24 bytes total:
+
+```text
+0x00  uint32    idOffset
+0x04  uint16    kind              (1=single, 2=animation)
+0x06  uint16    flags             = 0
+0x08  uint16    key565
+0x0A  uint16    width
+0x0C  uint16    height
+0x0E  uint16    frameCount        (0 for singles)
+0x10  uint32    data0             (single=payloadOffset, animation=firstFrameIndex)
+0x14  uint32    data1             (single=payloadLength, animation=0)
 ```
 
-Pack index fields:
+Frame records are also fixed-width:
 
-- `schemaVersion`: JSON schema version for the index document
-- `packFormatVersion`: binary pack format version, currently `1`
-- `packId`: logical pack id from manifests
-- `packFile`: relative path to the `.bpk` file
-- `assetCount`: number of assets in this pack
-- `assets`: asset metadata array
+```text
+0x00  uint16    width
+0x02  uint16    height
+0x04  uint32    payloadOffset
+0x08  uint32    payloadLength
+```
 
-Per-asset fields:
-
-- `id`: logical asset id from manifests
-- `kind`: `single` or `animation`
-- `pixelFormat`: currently always `rgb565`
-- `key565`: transparent key color used in payload
-- `width`, `height`: logical frame size
-- `payloadOffset`, `payloadLength`: used by single-image assets
-- `frameCount`, `frames[]`: used by animation assets
-- `character`, `animation`: present for animation assets
-- `tags`, `source`: optional debug/build metadata retained for tooling
+The string table stores null-terminated UTF-8 asset ids. `idOffset` points to an absolute byte offset inside the index file.
 
 ## Global Runtime Manifest
 
@@ -129,7 +115,7 @@ Per-asset fields:
     {
       "packId": "scene_common",
       "packFile": "packs/scene_common.bpk",
-      "indexFile": "index/scene_common.json",
+      "indexFile": "index/scene_common.bix",
       "assetCount": 8
     }
   ]
@@ -141,18 +127,18 @@ Per-asset fields:
 The first runtime loader should stay simple:
 
 1. Choose a pack id from gameplay context, such as `scene_common` or `character_triceratops`.
-2. Load only that pack's JSON index into memory.
+2. Load only that pack's binary index into memory.
 3. Look up assets by logical asset id string.
 4. Open the referenced `.bpk` file and `seek()` to the requested payload offset.
 5. Read RGB565 pixels into a caller-provided buffer.
 
-Version 1 intentionally trades some CPU and JSON parsing cost for clarity and low implementation risk.
+Version 1 intentionally keeps the format simple while removing the runtime JSON parsing overhead.
 
 ## Deliberate Non-Goals In Version 1
 
 - no PNG decoding on device
 - no compression
-- no binary global index
+- no binary global manifest
 - no cross-pack dependency graph
 - no automatic cache eviction policy baked into the file format
 

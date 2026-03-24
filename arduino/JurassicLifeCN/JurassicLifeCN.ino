@@ -123,6 +123,7 @@ struct AutoBehaviorRuntime;
 struct DailyEventDef;
 struct DailyEventNotice;
 struct SceneConfig;
+namespace BeansAssets { enum class AssetId : uint16_t; }
 
 // ================== APP MODE (gestion vs mini-jeux) ==================
 enum AppMode : uint8_t { MODE_PET, MODE_MG_WASH, MODE_MG_PLAY, MODE_MODAL_REPORT, MODE_RTC_PROMPT, MODE_RTC_SET, MODE_MODAL_EVENT, MODE_SCENE_SELECT };
@@ -261,6 +262,16 @@ static void processDailyEvents(uint32_t now, bool fromBoot);
 static void maybeOpenPendingDailyEventModal();
 static void clearAutoBehavior();
 static void applySceneConfig(SceneId sceneId, bool keepRelativePosition);
+struct RuntimeAnimationFrameView;
+static bool loadRuntimeAnimationFrame(const char* packId, const char* assetId, uint16_t frameIndex, RuntimeAnimationFrameView& out);
+static void drawImageKeyedOnBand(const uint16_t* img565, int w, int h, int x, int y, bool flipX, uint8_t shade);
+static void drawImageKeyedOnBandRAM(const uint16_t* img565, uint16_t key565, int w, int h, int x, int y, bool flipX, uint8_t shade);
+static bool runtimeSinglePlaceholderInfo(BeansAssets::AssetId assetId, int& w, int& h, const char*& label);
+static bool runtimeAnimationPlaceholderInfo(const char* packId, const char* assetId, int& w, int& h, const char*& label);
+static bool drawMissingPlaceholderCentered(BeansAssets::AssetId assetId);
+static bool drawMissingPlaceholderOnBand(BeansAssets::AssetId assetId, int x, int y);
+static bool drawMissingAnimationPlaceholderOnBand(const char* packId, const char* assetId, int x, int y, int& w, int& h);
+static void releaseRuntimeSingleCache(BeansAssets::AssetId assetId);
 
 // Mini-jeux
 static void mgBegin(TaskKind k, uint32_t now);
@@ -303,7 +314,6 @@ extern bool saveReady;   // save filesystem ready (LittleFS ou SD)
 
 #include "DinoNamesCN.h"
 #include "JurassicMusicRTTTL.h"
-#include "AssetRegistry.h"
 #include "RuntimeAssetManager.h"
 
 static const char* RUNTIME_ASSET_BASE_PATH = "/assets/runtime";
@@ -351,8 +361,8 @@ struct RuntimeAnimationFrameCacheEntry {
   uint32_t lastUsed = 0;
 };
 
-static const size_t RUNTIME_FRAME_CACHE_LIMIT_BYTES = 128U * 1024U;
-static RuntimeAnimationFrameCacheEntry runtimeFrameCaches[8];
+static const size_t RUNTIME_FRAME_CACHE_LIMIT_BYTES = 64U * 1024U;
+static RuntimeAnimationFrameCacheEntry runtimeFrameCaches[4];
 static size_t runtimeFrameCacheBytes = 0;
 static uint32_t runtimeFrameCacheTick = 0;
 
@@ -1803,8 +1813,31 @@ static AutoBehaviorArt defaultAutoArtForMove(AutoBehaviorMoveMode moveMode) {
   return (moveMode == AUTO_MOVE_WALK) ? AUTO_ART_MARCHE : AUTO_ART_ASSIE;
 }
 
+enum TriceratopsAnimId : uint8_t {
+  TRI_ANIM_SIT = 0,
+  TRI_ANIM_BLINK,
+  TRI_ANIM_EAT,
+  TRI_ANIM_SLEEP,
+  TRI_ANIM_AMOUR,
+  TRI_ANIM_WALK,
+};
+
+static inline uint8_t triceratopsLoveAnimId(AgeStage stg) {
+  (void)stg;
+  return TRI_ANIM_AMOUR;
+}
+
 static uint8_t autoBehaviorAnimIdForStage(AgeStage stg, AutoBehaviorArt art) {
-  return BeansAssets::triceratopsAnimIdForArt(stg, art);
+  (void)stg;
+  AutoBehaviorArt resolved = (art == AUTO_ART_AUTO) ? AUTO_ART_ASSIE : art;
+  switch (resolved) {
+    case AUTO_ART_MARCHE: return TRI_ANIM_WALK;
+    case AUTO_ART_CLIGNE: return TRI_ANIM_BLINK;
+    case AUTO_ART_DODO:   return TRI_ANIM_SLEEP;
+    case AUTO_ART_AMOUR:  return TRI_ANIM_AMOUR;
+    case AUTO_ART_MANGE:  return TRI_ANIM_EAT;
+    default:              return TRI_ANIM_SIT;
+  }
 }
 
 static void chooseBehaviorBubbleText(const char* src, char* dst, size_t dstSize) {
@@ -1915,19 +1948,101 @@ static inline float moveSpeedPxPerFrame() {
 }
 
 static inline uint8_t animIdForState(AgeStage stg, TriState st) {
-  return BeansAssets::triceratopsAnimIdForState(stg, st);
+  (void)stg;
+  switch (st) {
+    case ST_SIT:   return TRI_ANIM_SIT;
+    case ST_BLINK: return TRI_ANIM_BLINK;
+    case ST_EAT:   return TRI_ANIM_EAT;
+    case ST_SLEEP: return TRI_ANIM_SLEEP;
+    default:       return TRI_ANIM_WALK;
+  }
 }
+
+static const char* runtimeTriceratopsAssetId(AgeStage stg, uint8_t animId) {
+  if (animId == TRI_ANIM_SIT) return
+      (stg == AGE_JUNIOR) ? "character.triceratops.junior.sit" :
+      (stg == AGE_ADULTE) ? "character.triceratops.adult.sit" :
+                            "character.triceratops.senior.sit";
+  if (animId == TRI_ANIM_BLINK) return
+      (stg == AGE_JUNIOR) ? "character.triceratops.junior.blink" :
+      (stg == AGE_ADULTE) ? "character.triceratops.adult.blink" :
+                            "character.triceratops.senior.blink";
+  if (animId == TRI_ANIM_EAT) return
+      (stg == AGE_JUNIOR) ? "character.triceratops.junior.eat" :
+      (stg == AGE_ADULTE) ? "character.triceratops.adult.eat" :
+                            "character.triceratops.senior.eat";
+  if (animId == TRI_ANIM_SLEEP) return
+      (stg == AGE_JUNIOR) ? "character.triceratops.junior.sleep" :
+      (stg == AGE_ADULTE) ? "character.triceratops.adult.sleep" :
+                            "character.triceratops.senior.sleep";
+  if (animId == TRI_ANIM_AMOUR) return
+      (stg == AGE_JUNIOR) ? "character.triceratops.junior.amour" :
+      (stg == AGE_ADULTE) ? "character.triceratops.adult.amour" :
+                            "character.triceratops.senior.amour";
+  if (animId == TRI_ANIM_WALK) return
+      (stg == AGE_JUNIOR) ? "character.triceratops.junior.walk" :
+      (stg == AGE_ADULTE) ? "character.triceratops.adult.walk" :
+                            "character.triceratops.senior.walk";
+  return nullptr;
+}
+
+static bool runtimeAnimationInfo(const char* packId, const char* assetId, BeansAssets::RuntimeAnimationRef& out) {
+  if (!runtimeAssetsReady || !packId || !assetId) return false;
+  if (!runtimeAssetManager.isPackMounted(packId) && !runtimeAssetManager.mountPack(packId)) {
+    return false;
+  }
+  return runtimeAssetManager.getAnimation(assetId, out);
+}
+
+static inline const char* runtimeTriceratopsBaseAssetId(AgeStage stg) {
+  return runtimeTriceratopsAssetId(stg, TRI_ANIM_SIT);
+}
+
+static uint8_t runtimeTriceratopsAnimCount(AgeStage stg, uint8_t animId) {
+  const char* assetId = runtimeTriceratopsAssetId(stg, animId);
+  if (!assetId) return 1;
+  BeansAssets::RuntimeAnimationRef anim;
+  if (!runtimeAnimationInfo("character_triceratops", assetId, anim)) return 1;
+  return (uint8_t)anim.frameCount;
+}
+
 static inline uint8_t triAnimCount(AgeStage stg, uint8_t animId) {
-  return BeansAssets::triceratopsAnimCount(stg, animId);
-}
-static inline const uint16_t* triGetFrame(AgeStage stg, uint8_t animId, uint8_t idx) {
-  return BeansAssets::triceratopsFrame(stg, animId, idx);
+  return runtimeTriceratopsAnimCount(stg, animId);
 }
 static inline int triW(AgeStage stg) {
-  return BeansAssets::triceratopsWidth(stg);
+  BeansAssets::RuntimeAnimationRef anim;
+  if (!runtimeAnimationInfo("character_triceratops", runtimeTriceratopsBaseAssetId(stg), anim)) {
+    int w = 0;
+    int h = 0;
+    const char* label = nullptr;
+    runtimeAnimationPlaceholderInfo("character_triceratops", runtimeTriceratopsBaseAssetId(stg), w, h, label);
+    return w;
+  }
+  return (int)anim.width;
 }
 static inline int triH(AgeStage stg) {
-  return BeansAssets::triceratopsHeight(stg);
+  BeansAssets::RuntimeAnimationRef anim;
+  if (!runtimeAnimationInfo("character_triceratops", runtimeTriceratopsBaseAssetId(stg), anim)) {
+    int w = 0;
+    int h = 0;
+    const char* label = nullptr;
+    runtimeAnimationPlaceholderInfo("character_triceratops", runtimeTriceratopsBaseAssetId(stg), w, h, label);
+    return h;
+  }
+  return (int)anim.height;
+}
+
+static bool drawTriceratopsFrameOnBand(AgeStage stg, uint8_t animId, uint8_t frameIndex, const uint16_t* fallbackFrame, int x, int y, bool flipX=false, uint8_t shade=0) {
+  (void)fallbackFrame;
+  const char* assetId = runtimeTriceratopsAssetId(stg, animId);
+  RuntimeAnimationFrameView view;
+  if (assetId && loadRuntimeAnimationFrame("character_triceratops", assetId, frameIndex, view)) {
+    drawImageKeyedOnBandRAM(view.pixels, view.key565, view.w, view.h, x, y, flipX, shade);
+    return true;
+  }
+  int w = triW(stg);
+  int h = triH(stg);
+  return drawMissingAnimationPlaceholderOnBand("character_triceratops", assetId, x, y, w, h);
 }
 
 // ================== DRAW IMAGE KEYED ==================
@@ -1976,6 +2091,124 @@ static void drawImageKeyedOnBandRAM(const uint16_t* img565, uint16_t key565, int
       band.drawPixel(xx, yy, c);
     }
   }
+}
+
+static void drawPlaceholderBoxOnBand(int x, int y, int w, int h, const char* label) {
+  if (w <= 0) w = 32;
+  if (h <= 0) h = 32;
+  const int bandW = (int)band.width();
+  const int bandH = (int)band.height();
+  int x0 = max(0, x);
+  int y0 = max(0, y);
+  int x1 = min(bandW, x + w);
+  int y1 = min(bandH, y + h);
+  if (x1 <= x0 || y1 <= y0) return;
+  const int drawW = x1 - x0;
+  const int drawH = y1 - y0;
+  const uint16_t bg = 0xFD20;
+  band.fillRect(x0, y0, drawW, drawH, bg);
+  band.drawRect(x0, y0, drawW, drawH, TFT_RED);
+  if (drawW > 2 && drawH > 2) {
+    band.drawRect(x0 + 1, y0 + 1, drawW - 2, drawH - 2, TFT_BLACK);
+  }
+  band.drawLine(x0, y0, x1 - 1, y1 - 1, TFT_RED);
+  band.drawLine(x0, y1 - 1, x1 - 1, y0, TFT_RED);
+  if (label && label[0] && drawW >= 24 && drawH >= 14) {
+    band.setTextDatum(middle_center);
+    band.setTextColor(TFT_BLACK, bg);
+    band.drawString(label, x0 + drawW / 2, y0 + drawH / 2);
+    band.setTextDatum(top_left);
+  }
+}
+
+static void drawPlaceholderBoxCenteredOnTFT(int w, int h, const char* label) {
+  if (w <= 0) w = 64;
+  if (h <= 0) h = 64;
+  int x = (SW - w) / 2;
+  int y = (SH - h) / 2;
+  const uint16_t bg = 0xFD20;
+  tft.fillRect(x, y, w, h, bg);
+  tft.drawRect(x, y, w, h, TFT_RED);
+  if (w > 2 && h > 2) {
+    tft.drawRect(x + 1, y + 1, w - 2, h - 2, TFT_BLACK);
+  }
+  tft.drawLine(x, y, x + w - 1, y + h - 1, TFT_RED);
+  tft.drawLine(x, y + h - 1, x + w - 1, y, TFT_RED);
+  if (label && label[0] && w >= 36 && h >= 20) {
+    tft.setTextDatum(middle_center);
+    tft.setTextColor(TFT_BLACK, bg);
+    tft.drawString(label, x + w / 2, y + h / 2);
+    tft.setTextDatum(top_left);
+  }
+}
+
+static bool runtimeSinglePlaceholderInfo(BeansAssets::AssetId assetId, int& w, int& h, const char*& label) {
+  switch (assetId) {
+    case BeansAssets::AssetId::UiScreenTitlePageAccueil:
+      w = 320; h = 218; label = "TITLE"; return true;
+    case BeansAssets::AssetId::SceneCommonPropMountain:
+      w = 117; h = 56; label = "MOUNT"; return true;
+    case BeansAssets::AssetId::SceneCommonPropTreeBroadleaf:
+      w = 39; h = 73; label = "TREE"; return true;
+    case BeansAssets::AssetId::SceneCommonPropTreePine:
+      w = 40; h = 78; label = "PINE"; return true;
+    case BeansAssets::AssetId::SceneCommonPropBushBerry:
+      w = 51; h = 52; label = "BUSH"; return true;
+    case BeansAssets::AssetId::SceneCommonPropBushPlain:
+      w = 51; h = 52; label = "BUSH"; return true;
+    case BeansAssets::AssetId::SceneCommonPropPuddle:
+      w = 53; h = 20; label = "PUDDLE"; return true;
+    case BeansAssets::AssetId::SceneCommonPropCloud:
+      w = 65; h = 43; label = "CLOUD"; return true;
+    case BeansAssets::AssetId::SceneCommonPropBalloon:
+      w = 31; h = 31; label = "BAL"; return true;
+    case BeansAssets::AssetId::PropGameplayGraveMarker:
+      w = 32; h = 54; label = "RIP"; return true;
+    default:
+      w = 32; h = 32; label = "MISS"; return true;
+  }
+}
+
+static bool runtimeAnimationPlaceholderInfo(const char* packId, const char* assetId, int& w, int& h, const char*& label) {
+  (void)packId;
+  if (assetId && strcmp(assetId, "character.triceratops.egg.hatch") == 0) {
+    w = 50; h = 50; label = "EGG"; return true;
+  }
+  if (assetId && strcmp(assetId, "prop.gameplay.waste.default") == 0) {
+    w = 20; h = 20; label = "WASTE"; return true;
+  }
+  if (assetId && strstr(assetId, "character.triceratops.") == assetId) {
+    w = 90; h = 90; label = "DINO"; return true;
+  }
+  w = 32;
+  h = 32;
+  label = "ANIM";
+  return true;
+}
+
+static bool drawMissingPlaceholderCentered(BeansAssets::AssetId assetId) {
+  int w = 0;
+  int h = 0;
+  const char* label = nullptr;
+  if (!runtimeSinglePlaceholderInfo(assetId, w, h, label)) return false;
+  drawPlaceholderBoxCenteredOnTFT(w, h, label);
+  return true;
+}
+
+static bool drawMissingPlaceholderOnBand(BeansAssets::AssetId assetId, int x, int y) {
+  int w = 0;
+  int h = 0;
+  const char* label = nullptr;
+  if (!runtimeSinglePlaceholderInfo(assetId, w, h, label)) return false;
+  drawPlaceholderBoxOnBand(x, y, w, h, label);
+  return true;
+}
+
+static bool drawMissingAnimationPlaceholderOnBand(const char* packId, const char* assetId, int x, int y, int& w, int& h) {
+  const char* label = nullptr;
+  if (!runtimeAnimationPlaceholderInfo(packId, assetId, w, h, label)) return false;
+  drawPlaceholderBoxOnBand(x, y, w, h, label);
+  return true;
 }
 
 static void drawImageKeyedOnTFT(const uint16_t* img565, int w, int h, int x, int y, bool flipX=false, uint8_t shade=0) {
@@ -2326,6 +2559,8 @@ static bool savedWasSleeping = false;
 static char bootOfflineNotice[96] = {0};
 static char bootStorageNotice[96] = {0};
 static uint16_t bootStorageNoticeColor = TFT_WHITE;
+static char bootAssetNotice[96] = {0};
+static uint16_t bootAssetNoticeColor = TFT_RED;
 
 static inline int iClamp(int v, int lo, int hi){ if(v<lo) return lo; if(v>hi) return hi; return v; }
 static inline int fToI100(float f){ return iClamp((int)lroundf(f), 0, 100); }
@@ -3127,6 +3362,20 @@ static const RuntimeSingleSpriteCache* runtimeSingleCache(BeansAssets::AssetId a
   return runtimeSingleCacheEntry(assetId);
 }
 
+static void releaseRuntimeSingleCache(BeansAssets::AssetId assetId) {
+  RuntimeSingleSpriteCache* cache = runtimeSingleCacheEntry(assetId);
+  if (!cache) return;
+  if (cache->pixels) {
+    free(cache->pixels);
+    cache->pixels = nullptr;
+  }
+  cache->loaded = false;
+  cache->attempted = false;
+  cache->w = 0;
+  cache->h = 0;
+  cache->key565 = 0;
+}
+
 static void resetRuntimeFrameCacheEntry(RuntimeAnimationFrameCacheEntry& entry) {
   if (entry.pixels) {
     free(entry.pixels);
@@ -3323,6 +3572,7 @@ static bool ensureRuntimeSingleCached(BeansAssets::AssetId assetId) {
 }
 
 static void runtimeAssetsInit() {
+  bootAssetNotice[0] = 0;
   runtimeAssetsReady = false;
   for (size_t i = 0; i < (sizeof(runtimeSingleCaches) / sizeof(runtimeSingleCaches[0])); ++i) {
     if (runtimeSingleCaches[i].pixels) {
@@ -3343,6 +3593,8 @@ static void runtimeAssetsInit() {
   fs::FS* fs = runtimeAssetFS();
   if (!fs) {
     Serial.println("[ASSET] runtime FS unavailable");
+    strncpy(bootAssetNotice, "Missing runtime assets: no FS", sizeof(bootAssetNotice) - 1);
+    bootAssetNoticeColor = TFT_RED;
     return;
   }
 
@@ -3353,13 +3605,16 @@ static void runtimeAssetsInit() {
     Serial.println("[ASSET] runtime title pack OK");
   } else {
     Serial.printf("[ASSET] runtime title pack unavailable: %s\n", runtimeAssetManager.lastError());
+    strncpy(bootAssetNotice, "Copy assets/runtime to SD", sizeof(bootAssetNotice) - 1);
+    bootAssetNoticeColor = TFT_RED;
   }
+  bootAssetNotice[sizeof(bootAssetNotice) - 1] = 0;
 }
 
 static bool drawRuntimeSingleAssetCentered(BeansAssets::AssetId assetId) {
-  if (!ensureRuntimeSingleCached(assetId)) return false;
+  if (!ensureRuntimeSingleCached(assetId)) return drawMissingPlaceholderCentered(assetId);
   const RuntimeSingleSpriteCache* cache = runtimeSingleCache(assetId);
-  if (!cache || !cache->loaded || !cache->pixels) return false;
+  if (!cache || !cache->loaded || !cache->pixels) return drawMissingPlaceholderCentered(assetId);
   int x = (SW - (int)cache->w) / 2;
   int y = (SH - (int)cache->h) / 2;
   tft.pushImage(x, y, cache->w, cache->h, cache->pixels);
@@ -3367,25 +3622,40 @@ static bool drawRuntimeSingleAssetCentered(BeansAssets::AssetId assetId) {
 }
 
 static bool runtimeSingleDimensions(BeansAssets::AssetId assetId, int& w, int& h) {
-  if (!ensureRuntimeSingleCached(assetId)) return false;
+  if (!ensureRuntimeSingleCached(assetId)) {
+    const char* label = nullptr;
+    return runtimeSinglePlaceholderInfo(assetId, w, h, label);
+  }
   const RuntimeSingleSpriteCache* cache = runtimeSingleCache(assetId);
-  if (!cache || !cache->loaded) return false;
+  if (!cache || !cache->loaded) {
+    const char* label = nullptr;
+    return runtimeSinglePlaceholderInfo(assetId, w, h, label);
+  }
   w = (int)cache->w;
   h = (int)cache->h;
   return true;
 }
 
+static inline int graveMarkerHeight() {
+  int w = 0;
+  int h = 0;
+  if (!runtimeSingleDimensions(BeansAssets::AssetId::PropGameplayGraveMarker, w, h)) return 0;
+  return h;
+}
+
 static bool drawRuntimeSingleAssetOnBand(BeansAssets::AssetId assetId, int x, int y, bool flipX=false, uint8_t shade=0) {
-  if (!ensureRuntimeSingleCached(assetId)) return false;
+  if (!ensureRuntimeSingleCached(assetId)) return drawMissingPlaceholderOnBand(assetId, x, y);
   const RuntimeSingleSpriteCache* cache = runtimeSingleCache(assetId);
-  if (!cache || !cache->loaded || !cache->pixels) return false;
+  if (!cache || !cache->loaded || !cache->pixels) return drawMissingPlaceholderOnBand(assetId, x, y);
   drawImageKeyedOnBandRAM(cache->pixels, cache->key565, cache->w, cache->h, x, y, flipX, shade);
   return true;
 }
 
 static bool drawRuntimeAnimationFrameOnBand(const char* packId, const char* assetId, uint16_t frameIndex, int x, int y, int& w, int& h, bool flipX=false, uint8_t shade=0) {
   RuntimeAnimationFrameView view;
-  if (!loadRuntimeAnimationFrame(packId, assetId, frameIndex, view)) return false;
+  if (!loadRuntimeAnimationFrame(packId, assetId, frameIndex, view)) {
+    return drawMissingAnimationPlaceholderOnBand(packId, assetId, x, y, w, h);
+  }
   w = (int)view.w;
   h = (int)view.h;
   drawImageKeyedOnBandRAM(view.pixels, view.key565, view.w, view.h, x, y, flipX, shade);
@@ -4214,14 +4484,13 @@ static void drawModalOverlayBand(int bandY, int bh) {
         uint8_t animId = autoBehaviorAnimIdForStage(pet.stage, notice->art);
         uint8_t cnt = triAnimCount(pet.stage, animId);
         if (cnt == 0) cnt = 1;
-        const uint16_t* frame = triGetFrame(pet.stage, animId, animIdx % cnt);
         int dw = triW(pet.stage);
         int dh = triH(pet.stage);
         int px = boxX + boxW - dw - 8;
         int py = boxY + 42 - bandY;
         band.fillRect(px - 4, py - 4, dw + 8, dh + 8, 0xE71C);
         band.drawRect(px - 4, py - 4, dw + 8, dh + 8, 0xC618);
-        drawImageKeyedOnBand(frame, dw, dh, px, py, false, 0);
+        drawTriceratopsFrameOnBand(pet.stage, animId, animIdx % cnt, nullptr, px, py, false, 0);
       }
     }
     drawModalTextBand(bandY, boxX + 12, boxY + boxH - 34, "\xe4\xb8\xad\xe9\x97\xb4OK\xe7\xbb\xa7\xe7\xbb\xad", 0x39C7, 0xFFFF);
@@ -4327,9 +4596,9 @@ static void overlayUIIntoBand(int bandY, int bh) {
 // ================== DECOR ==================
 static void drawMountainImagesBand(float camX, int bandY) {
   if (!currentSceneConfig().showMountains) return;
-  int w = (int)MONT_W;
-  int h = (int)MONT_H;
-  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropMountain, w, h);
+  int w = 0;
+  int h = 0;
+  if (!runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropMountain, w, h)) return;
   const int yOnGround = GROUND_Y - h;
 
   float px = camX * 0.25f;
@@ -4344,17 +4613,15 @@ static void drawMountainImagesBand(float camX, int bandY) {
     int x = i * spacing - (int)px + jitter;
     int yLocal = yOnGround - bandY;
     if (yLocal >= band.height() || yLocal + h <= 0) continue;
-    if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropMountain, x, yLocal)) {
-      drawImageKeyedOnBand(MONT_IMG, w, h, x, yLocal);
-    }
+      drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropMountain, x, yLocal);
   }
 }
 
 static void drawSceneCloudsBand(float camX, int bandY) {
   if (!currentSceneConfig().showClouds) return;
-  int w = (int)NUAGE_W;
-  int h = (int)NUAGE_H;
-  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropCloud, w, h);
+  int w = 0;
+  int h = 0;
+  if (!runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropCloud, w, h)) return;
   float px = camX * 0.18f;
   const int spacing = 96;
   int first = (int)floor((px - SW) / spacing) - 2;
@@ -4364,9 +4631,7 @@ static void drawSceneCloudsBand(float camX, int bandY) {
     int yOnSky = 10 + (int)(hash32(i * 613) % 28);
     int yLocal = yOnSky - bandY;
     if (yLocal >= band.height() || yLocal + h <= 0) continue;
-    if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropCloud, x, yLocal, false, 0)) {
-      drawImageKeyedOnBand(NUAGE_IMG, w, h, x, yLocal, false, 0);
-    }
+    drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropCloud, x, yLocal, false, 0);
   }
 }
 
@@ -4461,17 +4726,14 @@ static void drawTreesMixedBand(float camX, int bandY) {
     const BeansAssets::AssetId assetId = useArbre
         ? BeansAssets::AssetId::SceneCommonPropTreeBroadleaf
         : BeansAssets::AssetId::SceneCommonPropTreePine;
-    const uint16_t* img = useArbre ? ARBRE_IMG : SAPIN_IMG;
-    int w = useArbre ? (int)ARBRE_W : (int)SAPIN_W;
-    int h = useArbre ? (int)ARBRE_H : (int)SAPIN_H;
-    runtimeSingleDimensions(assetId, w, h);
+    int w = 0;
+    int h = 0;
+    if (!runtimeSingleDimensions(assetId, w, h)) continue;
 
     int yOnGround = GROUND_Y - h;
     int yLocal = yOnGround - bandY;
     if (yLocal >= band.height() || yLocal + h <= 0) continue;
-    if (!drawRuntimeSingleAssetOnBand(assetId, x, yLocal)) {
-      drawImageKeyedOnBand(img, w, h, x, yLocal);
-    }
+    drawRuntimeSingleAssetOnBand(assetId, x, yLocal);
   }
 }
 
@@ -4513,15 +4775,15 @@ static void drawFixedObjectsBand(float camX, int bandY) {
   drawWaterStationBand(camX, bandY);
 
   if (poopVisible) {
-    int w = (int)WASTE_W;
-    int h = (int)WASTE_H;
+    BeansAssets::RuntimeAnimationRef wasteAnim;
+    if (!runtimeAnimationInfo("props_gameplay", "prop.gameplay.waste.default", wasteAnim)) return;
+    int w = (int)wasteAnim.width;
+    int h = (int)wasteAnim.height;
     int x = (int)roundf(poopWorldX - camX);
     int yOnGround = GROUND_Y - h + 18;
     int yLocal = yOnGround - bandY;
     if (!(yLocal >= band.height() || yLocal + h <= 0) && !(x > SW || x + w < 0)) {
-      if (!drawRuntimeAnimationFrameOnBand("props_gameplay", "prop.gameplay.waste.default", 2, x, yLocal, w, h)) {
-        drawImageKeyedOnBand(BeansAssets::wasteDefaultFrame(2), w, h, x, yLocal);
-      }
+      drawRuntimeAnimationFrameOnBand("props_gameplay", "prop.gameplay.waste.default", 2, x, yLocal, w, h);
     }
   }
 }
@@ -4576,6 +4838,8 @@ static void drawAutoBehaviorBubbleOnBand(int bandY, int dinoX, int dinoY) {
 static float lastCamX = 0.0f;
 static int lastBandMin = -1;
 static int lastBandMax = -1;
+static uint8_t renderAliveAnimId = 0;
+static uint8_t renderAliveFrameIndex = 0;
 
 static inline void pushBandToScreen(int y0, int bh) {
   uint16_t* buf = (uint16_t*)band.getBuffer();
@@ -4589,37 +4853,38 @@ static inline void renderOneBand(int y0, int bh, int dinoX, int dinoY, const uin
     int DW = triW(pet.stage);
     int DH = triH(pet.stage);
     if (dinoY < y0 + bh && dinoY + DH > y0) {
-      drawImageKeyedOnBand(frame, DW, DH, dinoX, dinoY - y0, flipX, shade);
+      drawTriceratopsFrameOnBand(pet.stage, renderAliveAnimId, renderAliveFrameIndex, frame, dinoX, dinoY - y0, flipX, shade);
     }
     drawAutoBehaviorBubbleOnBand(y0, dinoX, dinoY);
   } else if (phase == PHASE_EGG || phase == PHASE_HATCHING) {
     uint16_t eggFrameIndex = 0;
-    const uint16_t* eggFrame = BeansAssets::eggHatchFrame(0);
-    if (phase == PHASE_HATCHING) {
-      eggFrameIndex = hatchIdx;
-      eggFrame = BeansAssets::eggHatchFrame(hatchIdx);
+    if (phase == PHASE_HATCHING) eggFrameIndex = hatchIdx;
+    BeansAssets::RuntimeAnimationRef eggAnim;
+    if (!runtimeAnimationInfo("character_triceratops", "character.triceratops.egg.hatch", eggAnim)) {
+      overlayUIIntoBand(y0, bh);
+      pushBandToScreen(y0, bh);
+      return;
     }
-    int w = (int)EGG_W, h = (int)EGG_H;
+    int w = (int)eggAnim.width;
+    int h = (int)eggAnim.height;
     float t = (float)millis() * 0.008f;
     int bob = (int)roundf(sinf(t) * 2.0f);
     int ex = dinoX;
     int ey = (GROUND_Y - 40) + bob;
     if (ey < y0 + bh && ey + h > y0) {
-      if (!drawRuntimeAnimationFrameOnBand("character_triceratops", "character.triceratops.egg.hatch", eggFrameIndex, ex, ey - y0, w, h)) {
-        drawImageKeyedOnBand(eggFrame, w, h, ex, ey - y0);
-      }
+      drawRuntimeAnimationFrameOnBand("character_triceratops", "character.triceratops.egg.hatch", eggFrameIndex, ex, ey - y0, w, h);
     }
   } else if (phase == PHASE_TOMB || phase == PHASE_RESTREADY) {
-    int w = (int)TOMBE_W;
-    int h = (int)TOMBE_H;
-    runtimeSingleDimensions(BeansAssets::AssetId::PropGameplayGraveMarker, w, h);
+    int w = 0;
+    int h = 0;
+    if (!runtimeSingleDimensions(BeansAssets::AssetId::PropGameplayGraveMarker, w, h)) {
+      overlayUIIntoBand(y0, bh);
+      pushBandToScreen(y0, bh);
+      return;
+    }
     int tx = (SW - w) / 2;
     int ty = (GROUND_Y - h + 10);
-    if (ty < y0 + bh && ty + h > y0) {
-      if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::PropGameplayGraveMarker, tx, ty - y0)) {
-        drawImageKeyedOnBand(TOMBE_IMG, w, h, tx, ty - y0);
-      }
-    }
+    if (ty < y0 + bh && ty + h > y0) drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::PropGameplayGraveMarker, tx, ty - y0);
   }
 
   overlayUIIntoBand(y0, bh);
@@ -4629,7 +4894,7 @@ static inline void renderOneBand(int y0, int bh, int dinoX, int dinoY, const uin
 static void renderFrameOptimized(int dinoX, int dinoY, const uint16_t* frame, bool flipX, uint8_t shade) {
   bool camMoved = (fabsf(camX - lastCamX) > 0.001f);
   int DH = (phase == PHASE_ALIVE) ? triH(pet.stage)
-           : (phase == PHASE_TOMB || phase == PHASE_RESTREADY) ? (int)TOMBE_H
+           : (phase == PHASE_TOMB || phase == PHASE_RESTREADY) ? graveMarkerHeight()
            : 60;
 
   if (camMoved) {
@@ -4689,7 +4954,7 @@ static void renderGameFrame(uint32_t now) {
     bool forceFace = false;
     bool faceRight = false;
     if (task.active && task.kind == TASK_HUG && task.ph == PH_DO) {
-      animId = BeansAssets::triceratopsLoveAnimId(pet.stage);
+      animId = triceratopsLoveAnimId(pet.stage);
     }
 
     if (task.active && task.ph == PH_DO) {
@@ -4711,7 +4976,8 @@ static void renderGameFrame(uint32_t now) {
     dinoX = (int)roundf(worldX - camX);
 
     int dinoY = (GROUND_Y - TRI_FOOT_Y);
-    const uint16_t* frame = triGetFrame(pet.stage, animId, animIdx);
+    renderAliveAnimId = animId;
+    renderAliveFrameIndex = animIdx;
 
     bool flipX = flipForMovingRight(movingRight);
     if (forceFace) flipX = faceRight ? true : false;
@@ -4721,7 +4987,7 @@ static void renderGameFrame(uint32_t now) {
     else if (pet.hygiene < 20.0f) shade = 1;
 
     tft.startWrite();
-    renderFrameOptimized(dinoX, dinoY, frame, flipX, shade);
+    renderFrameOptimized(dinoX, dinoY, nullptr, flipX, shade);
     uiForceBands = false;
     tft.endWrite();
   } else {
@@ -5966,6 +6232,13 @@ static void mgBegin(TaskKind k, uint32_t now) {
 static bool mgUpdate(uint32_t now) {
   if (mg.startedAt == 0) { mg.success = false; mg.score = 0; return true; }
 
+  int cloudW = 0;
+  int cloudH = 0;
+  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropCloud, cloudW, cloudH);
+  int balloonW = 0;
+  int balloonH = 0;
+  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropBalloon, balloonW, balloonH);
+
   if ((int32_t)(now - mgAnimNextTick) >= 0) {
     uint8_t animId = animIdForState(pet.stage, ST_WALK);
     uint8_t cnt = triAnimCount(pet.stage, animId);
@@ -5975,8 +6248,7 @@ static bool mgUpdate(uint32_t now) {
   }
 
   if (mg.kind == TASK_WASH) {
-    const int CLOUD_W = (int)NUAGE_W;
-    const int CLOUD_H = (int)NUAGE_H;
+    if (cloudW <= 12 || cloudH <= 0) return false;
     const int DINO_DRAW_W = triW(pet.stage);
     const int DINO_HIT_W = triW(pet.stage);
     const int DINO_HIT_H = triH(pet.stage);
@@ -6003,7 +6275,7 @@ static bool mgUpdate(uint32_t now) {
     if (btnRightHeld) mgCloudX += 4.0f;
 
     mgCloudX += mgCloudV;
-    float cloudHalf = (float)(CLOUD_W / 2);
+    float cloudHalf = (float)(cloudW / 2);
     if (mgCloudX < cloudHalf) { mgCloudX = cloudHalf; mgCloudV = fabsf(mgCloudV); }
     if (mgCloudX > (float)(SW - cloudHalf)) { mgCloudX = (float)(SW - cloudHalf); mgCloudV = -fabsf(mgCloudV); }
 
@@ -6021,8 +6293,8 @@ if ((int32_t)(now - mgNextDropAt) >= 0) {
     for (int i = 0; i < MG_RAIN_MAX; i++) {
       if (!mgRain[i].active) {
         mgRain[i].active = true;
-        mgRain[i].x = mgCloudX + (float)random(-CLOUD_W / 2 + 6, CLOUD_W / 2 - 6);
-        mgRain[i].y = (float)CLOUD_H + 4;
+        mgRain[i].x = mgCloudX + (float)random(-cloudW / 2 + 6, cloudW / 2 - 6);
+        mgRain[i].y = (float)cloudH + 4;
         mgRain[i].vy = 2.6f + (float)random(0, 10) * 0.1f;
         break;
       }
@@ -6136,6 +6408,12 @@ if ((int32_t)(now - mgNextDropAt) >= 0) {
 
 static void mgDraw(uint32_t now) {
   (void)now;
+  int cloudW = 0;
+  int cloudH = 0;
+  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropCloud, cloudW, cloudH);
+  int balloonW = 0;
+  int balloonH = 0;
+  runtimeSingleDimensions(BeansAssets::AssetId::SceneCommonPropBalloon, balloonW, balloonH);
   tft.startWrite();
   for (int y = 0; y < SH; y += BAND_H) {
     int bh = (y + BAND_H <= SH) ? BAND_H : (SH - y);
@@ -6143,15 +6421,12 @@ static void mgDraw(uint32_t now) {
     band.setClipRect(0, 0, SW, bh);
 
     if (appMode == MODE_MG_WASH) {
-const int CLOUD_W = (int)NUAGE_W;
-const int CLOUD_H = (int)NUAGE_H;
-
 const int GROUND = SH - UI_BOT_H - 6;      // <-- sol du mini-jeu
 const int DINO_W = triW(pet.stage);
 const int DINO_H = triH(pet.stage);
 const int DINO_Y = GROUND - DINO_H + 25;        // <-- dino posé sur le sol
 
-const uint16_t* frame = triGetFrame(pet.stage, (uint8_t)animIdForState(pet.stage, ST_WALK), mgAnimIdx);
+const uint8_t animIdWalk = (uint8_t)animIdForState(pet.stage, ST_WALK);
 bool flip = flipForMovingRight(mgDinoV >= 0.0f);
 
 // ---- SOL (à ajouter) ----
@@ -6174,10 +6449,8 @@ if (GROUND >= y && GROUND < y + bh) {
         resetFont(band);
       }
 
-      if (y + bh > 4 && y < 4 + CLOUD_H) {
-        if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropCloud, (int)mgCloudX - CLOUD_W / 2, 4 - y, false, 0)) {
-          drawImageKeyedOnBand(NUAGE_IMG, CLOUD_W, CLOUD_H, (int)mgCloudX - CLOUD_W / 2, 4 - y, false, 0);
-        }
+      if (cloudW > 0 && cloudH > 0 && y + bh > 4 && y < 4 + cloudH) {
+        drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropCloud, (int)mgCloudX - cloudW / 2, 4 - y, false, 0);
       }
 
       for (int i = 0; i < MG_RAIN_MAX; i++) {
@@ -6189,7 +6462,7 @@ if (GROUND >= y && GROUND < y + bh) {
       }
 
       if (y + bh > DINO_Y && y < DINO_Y + DINO_H) {
-        drawImageKeyedOnBand(frame, DINO_W, DINO_H, (int)mgDinoX, DINO_Y - y, flip, 0);
+        drawTriceratopsFrameOnBand(pet.stage, animIdWalk, mgAnimIdx, nullptr, (int)mgDinoX, DINO_Y - y, flip, 0);
       }
     } 
     else {
@@ -6198,7 +6471,7 @@ if (GROUND >= y && GROUND < y + bh) {
       const int DINO_H = triH(pet.stage);
       const int GROUND = SH - UI_BOT_H - 6;
       int dinoTop = (int)(GROUND - DINO_H + mgPlayDinoY + 25);
-      const uint16_t* frame = triGetFrame(pet.stage, (uint8_t)animIdForState(pet.stage, ST_WALK), mgAnimIdx);
+      const uint8_t animIdWalk = (uint8_t)animIdForState(pet.stage, ST_WALK);
 
       if (y + bh > 0 && y < 22) {
         setCNFont(band);
@@ -6225,17 +6498,15 @@ if (GROUND >= y && GROUND < y + bh) {
 
       for (int i = 0; i < MG_BALLOON_MAX; i++) {
         if (!mgBalloons[i].active) continue;
-        int bx = (int)mgBalloons[i].x - (int)BALLON_W / 2;
-        int by = (int)mgBalloons[i].y - (int)BALLON_H / 2;
-        if (y + bh > by && y < by + (int)BALLON_H) {
-          if (!drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropBalloon, bx, by - y, false, 0)) {
-            drawImageKeyedOnBand(BALLON_IMG, (int)BALLON_W, (int)BALLON_H, bx, by - y, false, 0);
-          }
+        int bx = (int)mgBalloons[i].x - balloonW / 2;
+        int by = (int)mgBalloons[i].y - balloonH / 2;
+        if (balloonW > 0 && balloonH > 0 && y + bh > by && y < by + balloonH) {
+          drawRuntimeSingleAssetOnBand(BeansAssets::AssetId::SceneCommonPropBalloon, bx, by - y, false, 0);
         }
       }
 
       if (y + bh > dinoTop && y < dinoTop + DINO_H) {
-        drawImageKeyedOnBand(frame, DINO_W, DINO_H, DINO_X, dinoTop - y, flipForMovingRight(true), 0);
+        drawTriceratopsFrameOnBand(pet.stage, animIdWalk, mgAnimIdx, nullptr, DINO_X, dinoTop - y, flipForMovingRight(true), 0);
       }
     }
 
@@ -6337,15 +6608,14 @@ static void resetToEgg(uint32_t now) {
 
 static void showHomeIntro(uint32_t now) {
   tft.fillScreen(TFT_BLACK);
-
-  if (!drawRuntimeSingleAssetCentered(BeansAssets::AssetId::UiScreenTitlePageAccueil)) {
-    const BeansAssets::SingleAssetRef titleScreen =
-        BeansAssets::singleAsset(BeansAssets::AssetId::UiScreenTitlePageAccueil);
-    int imgW = (int)titleScreen.w;
-    int imgH = (int)titleScreen.h;
-    int x = (SW - imgW) / 2;
-    int y = (SH - imgH) / 2;
-    tft.pushImage(x, y, imgW, imgH, titleScreen.data);
+  const bool introDrawn = drawRuntimeSingleAssetCentered(BeansAssets::AssetId::UiScreenTitlePageAccueil);
+  if (!introDrawn) {
+    Serial.println("[ASSET] title screen unavailable in runtime bundle");
+  }
+  if (introDrawn) {
+    // The intro screen is a one-shot full-screen image; releasing it avoids starving
+    // animation frames later on smaller-memory boards.
+    releaseRuntimeSingleCache(BeansAssets::AssetId::UiScreenTitlePageAccueil);
   }
 
   setCNFontTFT();
@@ -6355,6 +6625,11 @@ static void showHomeIntro(uint32_t now) {
   tft.drawString("BeansPetGame", SW / 2, 10);
   tft.setTextSize(1);
   tft.drawString("\xe7\xbd\x97\xe5\xbe\xb7\xe5\xb2\x9b\xe9\xbe\x99\xe6\xb3\xa1\xe6\xb3\xa1\xe7\x85\xa7\xe6\x8a\xa4\xe7\xbb\x88\xe7\xab\xaf", SW / 2, 32);  // 罗德岛龙泡泡照护终端
+  if (bootAssetNotice[0] != 0) {
+    tft.setTextColor(bootAssetNoticeColor, TFT_BLACK);
+    tft.drawString(bootAssetNotice, SW / 2, SH - (bootStorageNotice[0] != 0 ? 36 : 22));
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  }
   if (bootStorageNotice[0] != 0) {
     tft.setTextColor(bootStorageNoticeColor, TFT_BLACK);
     tft.drawString(bootStorageNotice, SW / 2, SH - 22);

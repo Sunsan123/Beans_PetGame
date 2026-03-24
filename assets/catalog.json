@@ -11,21 +11,9 @@
     "manifests/characters/triceratops.json"
   ],
   "targets": {
-    "staging_headers": {
-      "type": "arduino_headers",
-      "outDir": "build/generated_headers"
-    },
     "runtime_bundles": {
       "type": "runtime_bundle",
       "outDir": "build/runtime"
-    },
-    "sprites_compat_headers": {
-      "type": "arduino_headers",
-      "outDir": "../Sprites/generated_headers"
-    },
-    "legacy_headers": {
-      "type": "arduino_headers",
-      "outDir": "../arduino/JurassicLifeCN"
     }
   }
 }
