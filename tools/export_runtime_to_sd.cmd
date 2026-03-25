@@ -5,6 +5,10 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "REPO_ROOT=%%~fI"
 set "BUILD_SCRIPT=%REPO_ROOT%\Sprites\build_sprites.py"
 set "RUNTIME_SOURCE=%REPO_ROOT%\assets\build\runtime"
+for %%I in ("%REPO_ROOT%\assets") do set "REPO_ASSETS=%%~fI"
+for %%I in ("%REPO_ROOT%\assets\src") do set "REPO_ASSETS_SRC=%%~fI"
+for %%I in ("%REPO_ROOT%\assets\build") do set "REPO_ASSETS_BUILD=%%~fI"
+for %%I in ("%REPO_ROOT%\assets\build\runtime") do set "REPO_RUNTIME_SOURCE=%%~fI"
 
 echo.
 echo Beans_PetGame runtime asset export
@@ -42,6 +46,43 @@ if not "%DEST_ROOT:~-1%"=="\" set "DEST_ROOT=%DEST_ROOT%\"
 
 set "DEST_TARGET=%DEST_ROOT%assets\runtime"
 if /I "%DEST_ROOT:~-15%"=="assets\runtime\" set "DEST_TARGET=%DEST_ROOT:~0,-1%"
+
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p='%DEST_TARGET:\=\\%'; [System.IO.Path]::GetFullPath($p).TrimEnd('\')"`) do set "DEST_TARGET_FULL=%%P"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p='%REPO_ROOT:\=\\%'; [System.IO.Path]::GetFullPath($p).TrimEnd('\')"`) do set "REPO_ROOT_FULL=%%P"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p='%REPO_ASSETS:\=\\%'; [System.IO.Path]::GetFullPath($p).TrimEnd('\')"`) do set "REPO_ASSETS_FULL=%%P"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p='%REPO_ASSETS_SRC:\=\\%'; [System.IO.Path]::GetFullPath($p).TrimEnd('\')"`) do set "REPO_ASSETS_SRC_FULL=%%P"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p='%REPO_ASSETS_BUILD:\=\\%'; [System.IO.Path]::GetFullPath($p).TrimEnd('\')"`) do set "REPO_ASSETS_BUILD_FULL=%%P"
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p='%REPO_RUNTIME_SOURCE:\=\\%'; [System.IO.Path]::GetFullPath($p).TrimEnd('\')"`) do set "REPO_RUNTIME_SOURCE_FULL=%%P"
+
+echo Resolved export target: %DEST_TARGET_FULL%
+
+if /I "%DEST_TARGET_FULL%"=="%REPO_ROOT_FULL%" (
+  echo Refusing export: target resolves to repository root.
+  goto :fail
+)
+if /I "%DEST_TARGET_FULL%"=="%REPO_ASSETS_FULL%" (
+  echo Refusing export: target resolves to assets root.
+  goto :fail
+)
+if /I "%DEST_TARGET_FULL%"=="%REPO_ASSETS_SRC_FULL%" (
+  echo Refusing export: target resolves to assets\src.
+  goto :fail
+)
+if /I "%DEST_TARGET_FULL%"=="%REPO_ASSETS_BUILD_FULL%" (
+  echo Refusing export: target resolves to assets\build.
+  goto :fail
+)
+if /I "%DEST_TARGET_FULL%"=="%REPO_RUNTIME_SOURCE_FULL%" (
+  echo Refusing export: target resolves to the generated runtime source folder inside the repo.
+  goto :fail
+)
+
+echo %DEST_TARGET_FULL% | findstr /I /B /C:"%REPO_ROOT_FULL%\\" >nul
+if not errorlevel 1 (
+  echo Refusing export: target is inside the repository tree.
+  echo Use an SD root like H:\ or an external staging folder like C:\temp\sd_export
+  goto :fail
+)
 
 echo.
 echo [1/3] Building runtime bundles...
