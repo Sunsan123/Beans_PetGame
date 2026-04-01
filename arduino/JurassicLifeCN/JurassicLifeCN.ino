@@ -127,7 +127,7 @@ struct SceneConfig;
 namespace BeansAssets { enum class AssetId : uint16_t; }
 
 // ================== APP MODE (gestion vs mini-jeux) ==================
-enum AppMode : uint8_t { MODE_PET, MODE_MG_WASH, MODE_MG_PLAY, MODE_MODAL_REPORT, MODE_RTC_PROMPT, MODE_RTC_SET, MODE_MODAL_EVENT, MODE_SCENE_SELECT };
+enum AppMode : uint8_t { MODE_PET, MODE_DRESS, MODE_MG_WASH, MODE_MG_PLAY, MODE_MODAL_REPORT, MODE_RTC_PROMPT, MODE_RTC_SET, MODE_MODAL_EVENT, MODE_SCENE_SELECT };
 static AppMode appMode = MODE_PET;
 
 struct MiniGameCtx {
@@ -277,6 +277,8 @@ static bool drawMissingPlaceholderCentered(BeansAssets::AssetId assetId);
 static bool drawMissingPlaceholderOnBand(BeansAssets::AssetId assetId, int x, int y);
 static bool drawMissingAnimationPlaceholderOnBand(const char* packId, const char* assetId, int x, int y, int& w, int& h);
 static void releaseRuntimeSingleCache(BeansAssets::AssetId assetId);
+static void dressThemeBuildThumbPath(uint8_t category, const char* dirName, char* dst, size_t dstSize);
+static void dressThemeBuildPreviewRgb565Path(uint8_t category, const char* dirName, char* dst, size_t dstSize);
 
 // Mini-jeux
 static void mgBegin(TaskKind k, uint32_t now);
@@ -1515,6 +1517,72 @@ static char petName[20] = "???";
 // ================== UI ==================
 static uint8_t uiSel = 0;
 
+enum DressTab : uint8_t {
+  DRESS_TAB_THEME = 0,
+  DRESS_TAB_SINGLE,
+  DRESS_TAB_PRESET
+};
+static DressTab dressTab = DRESS_TAB_THEME;
+static bool dressThemePanelOpen = false;
+
+enum DressThemePanelView : uint8_t {
+  DRESS_THEME_VIEW_THEMES = 0,
+  DRESS_THEME_VIEW_COMPONENTS
+};
+static DressThemePanelView dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+
+enum DressThemeCategory : uint8_t {
+  DRESS_THEME_CATEGORY_RECEPTION = 0,
+  DRESS_THEME_CATEGORY_ROOM = 1
+};
+
+#include "modules/JurassicLifeDressThemeCatalog.h"
+
+struct DressThemeEntry {
+  char dirName[96];
+  uint8_t category = DRESS_THEME_CATEGORY_ROOM;
+};
+
+static const uint16_t DRESS_THEME_MAX = 136;
+static DressThemeEntry dressThemes[DRESS_THEME_MAX];
+static uint16_t dressThemeCount = 0;
+static bool dressThemesScanned = false;
+static bool dressThemeThumbKnown[DRESS_THEME_MAX];
+static bool dressThemeThumbAvailable[DRESS_THEME_MAX];
+static bool dressThemeThumbCacheReady[2] = { false, false };
+static char dressThemeThumbPath[DRESS_THEME_MAX][280];
+static uint16_t dressThemeFiltered[DRESS_THEME_MAX];
+static uint16_t dressThemeFilteredCount = 0;
+static uint16_t dressThemeSelected = 0;
+static uint16_t dressThemeScroll = 0;
+static bool dressThemeFilteredDirty = true;
+static uint8_t dressThemeFilteredCategory = 0xFF;
+static int16_t dressThemeAppliedRawIndex[2] = { -1, -1 };
+static const uint8_t DRESS_THEME_THUMB_WINDOW_MAX = 2;
+struct DressThemeThumbWindowEntry {
+  int16_t rawIndex = -1;
+  uint16_t w = 0;
+  uint16_t h = 0;
+  uint16_t* pixels = nullptr;
+};
+static DressThemeThumbWindowEntry dressThemeThumbWindow[DRESS_THEME_THUMB_WINDOW_MAX];
+static uint16_t dressThemeThumbWindowScroll = 0xFFFF;
+static uint16_t dressThemeThumbWindowCount = 0;
+static uint16_t dressThemeThumbWindowW = 0;
+static uint16_t dressThemeThumbWindowH = 0;
+
+struct DressThemeComponentEntry {
+  char path[224];
+  char label[64];
+};
+static const uint16_t DRESS_THEME_COMPONENT_MAX = 64;
+static DressThemeComponentEntry dressThemeComponents[DRESS_THEME_COMPONENT_MAX];
+static uint16_t dressThemeComponentCount = 0;
+static uint16_t dressThemeComponentSelected = 0;
+static uint16_t dressThemeComponentScroll = 0;
+static int16_t dressThemeComponentThemeRawIndex = -1;
+static bool dressThemeComponentListDirty = true;
+
 static const uint16_t COL_FAIM    = 0xFD20;
 static const uint16_t COL_SOIF    = 0x03FF;
 static const uint16_t COL_HYGIENE = 0x07FF;
@@ -1564,9 +1632,20 @@ static const int UI_TOP_H = 95;   // + grand pour remonter bars + barre activit�
 static const int UI_BOT_H = 52;
 LGFX_Sprite uiTop(&tft);
 LGFX_Sprite uiBot(&tft);
+LGFX_Sprite dressThemeGallery(&tft);
+LGFX_Sprite dressThemePreview(&tft);
 
 static bool uiSpriteDirty = true;
 static bool uiForceBands  = true;
+static bool dressThemeGalleryDirty = true;
+static bool dressThemeGalleryLowMemMode = false;
+static int dressThemeGalleryW = 0;
+static int dressThemeGalleryH = 0;
+static bool dressThemePreviewDirty = true;
+static int dressThemePreviewW = 0;
+static int dressThemePreviewH = 0;
+static int16_t dressThemePreviewRawIndex = -1;
+static uint8_t dressThemePreviewCategory = 0xFF;
 
 // ================== MONDE / scene state ==================
 #include "modules/JurassicLifeSceneState.h"
@@ -2177,10 +2256,13 @@ static inline uint8_t uiButtonCount() {
   if (phase == PHASE_RESTREADY) return 1;
   if (phase == PHASE_TOMB) return 1;
   if (state == ST_SLEEP) return 1;
+  if (isDressThemeBrowseActive()) return 1;
+  if (isDressModeActive()) return dressButtonCount();
   return uiAliveCount();
 
 }
 static inline bool uiShowSceneArrows() {
+  if (isDressModeActive()) return false;
   return phase == PHASE_ALIVE && state != ST_SLEEP;
 }
 static inline int uiBottomGap() { return 3; }
@@ -2212,7 +2294,71 @@ static inline int uiButtonWidth(uint8_t nbtn) {
   calcBottomActionLayout(nbtn, startX, bw, bh, yy, gap);
   return bw;
 }
+static inline uint8_t dressThemeVisibleSlots() {
+  return 2;
+}
+static inline uint16_t dressThemePageStartForIndex(uint16_t index) {
+  uint8_t visible = dressThemeVisibleSlots();
+  if (visible == 0) return 0;
+  return (uint16_t)((index / visible) * visible);
+}
+static inline uint16_t dressThemeMaxScrollForCount(uint16_t count) {
+  if (count == 0) return 0;
+  return dressThemePageStartForIndex((uint16_t)(count - 1));
+}
+static inline uint8_t dressThemeGridCols(uint8_t visibleSlots) {
+  return min<uint8_t>(2, max<uint8_t>(1, visibleSlots));
+}
+static inline uint8_t dressThemeGridRows(uint8_t visibleSlots) {
+  uint8_t cols = dressThemeGridCols(visibleSlots);
+  return max<uint8_t>(1, (uint8_t)((visibleSlots + cols - 1) / cols));
+}
+static void calcDressThemeGallerySlotRect(uint8_t slot,
+                                          int cardX,
+                                          int cardY,
+                                          int cardW,
+                                          int cardH,
+                                          int cardGap,
+                                          uint8_t visibleSlots,
+                                          int& outX,
+                                          int& outY) {
+  uint8_t cols = dressThemeGridCols(visibleSlots);
+  int col = slot % cols;
+  int row = slot / cols;
+  outX = cardX + col * (cardW + cardGap);
+  outY = cardY + row * (cardH + cardGap);
+}
+static void calcDressThemeGalleryLayout(int& galleryX,
+                                        int& galleryY,
+                                        int& galleryW,
+                                        int& galleryH,
+                                        int& arrowW,
+                                        int& cardX,
+                                        int& cardY,
+                                        int& cardW,
+                                        int& cardH,
+                                        int& cardGap,
+                                        int& labelH,
+                                        uint8_t& visibleSlots) {
+  galleryX = 8;
+  galleryW = SW - 16;
+  galleryH = (SW >= 300) ? 122 : 128;
+  galleryY = SH - UI_BOT_H - galleryH - 6;
+  arrowW = 18;
+  cardGap = 4;
+  labelH = (SW >= 300) ? 16 : 14;
+  visibleSlots = dressThemeVisibleSlots();
+  int cols = dressThemeGridCols(visibleSlots);
+  int rows = dressThemeGridRows(visibleSlots);
+  int cardsAreaW = galleryW - (arrowW * 2) - ((int)cols - 1) * cardGap;
+  int cardsAreaH = galleryH - 12 - ((int)rows - 1) * cardGap;
+  cardW = max(52, cardsAreaW / max(1, cols));
+  cardH = max(40, cardsAreaH / max(1, rows));
+  cardX = galleryX + arrowW;
+  cardY = galleryY + 6;
+}
 static inline const char* uiSingleLabel() {
+  if (isDressThemeBrowseActive()) return "\xe8\xbf\x94\xe5\x9b\x9e";
   if (phase == PHASE_EGG) return "\xe5\xbc\x80\xe5\xa7\x8b\xe5\xad\xb5\xe5\x8c\x96";           // 闁诲孩顔栭崰鎺楀磻閹炬枼鏀芥い鏃傗拡閸庡繑銇勯幒婵嗘珝鐎?
   if (phase == PHASE_HATCHING) return "...";
   if (phase == PHASE_RESTREADY) return "\xe9\x87\x8d\xe6\x96\xb0\xe6\x94\xb6\xe5\xae\xb9"; // 闂傚倷鐒﹁ぐ鍐矓閻㈢钃熷┑鐘叉搐缂佲晠鎮规潪鎷岊劅闁?
@@ -2221,6 +2367,7 @@ static inline const char* uiSingleLabel() {
   return "?";
 }
 static inline uint16_t uiSingleColor() {
+  if (isDressThemeBrowseActive()) return dressButtonColor(0);
   if (phase == PHASE_EGG) return 0x07E0;
   if (phase == PHASE_RESTREADY) return 0x07E0;
   if (phase == PHASE_TOMB) return TFT_RED;
@@ -2428,6 +2575,534 @@ static fs::FS* runtimeAssetFS() {
   if (saveFsPtr) return saveFsPtr;
 #endif
   return nullptr;
+}
+
+static const char* DRESS_THEME_RECEPTION_ROOT = "/assets/src/shop/furniture/\xe4\xb8\xbb\xe9\xa2\x98/\xe4\xbc\x9a\xe5\xae\xa2\xe5\xae\xa4\xe4\xb8\xbb\xe9\xa2\x98";
+static const char* DRESS_THEME_ROOM_ROOT = "/assets/src/shop/furniture/\xe4\xb8\xbb\xe9\xa2\x98/\xe5\xae\xbf\xe8\x88\x8d\x5f\xe6\xb4\xbb\xe5\x8a\xa8\xe5\xae\xa4\xe4\xb8\xbb\xe9\xa2\x98";
+static const char* DRESS_THEME_THUMB_NAME = "\x30\x30\x30\x5f\xe4\xb8\xbb\xe9\xa2\x98\xe5\x9b\xbe\x2e\x70\x6e\x67";
+static const char* DRESS_THEME_PREVIEW_RGB565_NAME = "000_theme_preview.rgb565";
+static const char* DRESS_SCENE_RECEPTION_LABEL = "\xe4\xbc\x9a\xe5\xae\xa2\xe5\xae\xa4";
+
+static fs::FS* dressThemeAssetFS() {
+  fs::FS* sdFs = sdReady ? &SD : nullptr;
+  fs::FS* saveFsPtr = saveReady ? &saveFS : nullptr;
+
+  auto hasThemeAssets = [](fs::FS& fs) -> bool {
+    return fs.exists(DRESS_THEME_RECEPTION_ROOT) || fs.exists(DRESS_THEME_ROOM_ROOT);
+  };
+
+  if (sdFs && hasThemeAssets(*sdFs)) return sdFs;
+  if (saveFsPtr && saveFsPtr != sdFs && hasThemeAssets(*saveFsPtr)) return saveFsPtr;
+  return runtimeAssetFS();
+}
+
+static const char* dressThemeRootForCategory(uint8_t category) {
+  return (category == DRESS_THEME_CATEGORY_RECEPTION) ? DRESS_THEME_RECEPTION_ROOT : DRESS_THEME_ROOM_ROOT;
+}
+
+static const char* dressThemeBasename(const char* path) {
+  if (!path || !path[0]) return "";
+  const char* slash = strrchr(path, '/');
+  return slash ? slash + 1 : path;
+}
+
+static void dressThemeCopyName(char* dst, size_t dstSize, const char* src) {
+  if (!dst || dstSize == 0) return;
+  dst[0] = 0;
+  if (!src) return;
+  strncpy(dst, src, dstSize - 1);
+  dst[dstSize - 1] = 0;
+}
+
+static void dressThemeDisplayName(const char* dirName, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  const char* src = dirName ? dirName : "";
+  const char* split = strchr(src, '_');
+  if (split && split[1] != 0) src = split + 1;
+  dressThemeCopyName(dst, dstSize, src);
+}
+
+static bool dressThemeAppend(const char* dirName, uint8_t category) {
+  if (!dirName || !dirName[0]) return false;
+  if (dressThemeCount >= DRESS_THEME_MAX) return false;
+
+  DressThemeEntry& entry = dressThemes[dressThemeCount++];
+  dressThemeCopyName(entry.dirName, sizeof(entry.dirName), dirName);
+  entry.category = category;
+  return true;
+}
+
+static void dressThemeAppendCatalog(const char* const* names, size_t count, uint8_t category) {
+  if (!names) return;
+  for (size_t i = 0; i < count && dressThemeCount < DRESS_THEME_MAX; ++i) {
+    dressThemeAppend(names[i], category);
+  }
+}
+
+static void dressThemeEnsureCatalog() {
+  if (dressThemesScanned) return;
+  dressThemesScanned = true;
+  dressThemeCount = 0;
+  for (uint16_t i = 0; i < DRESS_THEME_MAX; ++i) {
+    dressThemeThumbKnown[i] = false;
+    dressThemeThumbAvailable[i] = false;
+    dressThemeThumbPath[i][0] = 0;
+  }
+  dressThemeThumbCacheReady[DRESS_THEME_CATEGORY_RECEPTION] = false;
+  dressThemeThumbCacheReady[DRESS_THEME_CATEGORY_ROOM] = false;
+  dressThemeAppendCatalog(
+      kDressThemeReceptionCatalog,
+      sizeof(kDressThemeReceptionCatalog) / sizeof(kDressThemeReceptionCatalog[0]),
+      DRESS_THEME_CATEGORY_RECEPTION);
+  dressThemeAppendCatalog(
+      kDressThemeRoomCatalog,
+      sizeof(kDressThemeRoomCatalog) / sizeof(kDressThemeRoomCatalog[0]),
+      DRESS_THEME_CATEGORY_ROOM);
+}
+
+static uint8_t dressThemeCategoryForScene(SceneId scene) {
+  const char* label = sceneLabel(scene);
+  if (label && strcmp(label, DRESS_SCENE_RECEPTION_LABEL) == 0) return DRESS_THEME_CATEGORY_RECEPTION;
+  return DRESS_THEME_CATEGORY_ROOM;
+}
+
+static bool dressThemeRootAvailable(uint8_t category) {
+  fs::FS* fs = dressThemeAssetFS();
+  const char* rootPath = dressThemeRootForCategory(category);
+  return fs && rootPath && rootPath[0] && fs->exists(rootPath);
+}
+
+static bool dressThemeAppliedRawIndexForCategory(uint8_t category, uint16_t& outRawIndex) {
+  if (category > DRESS_THEME_CATEGORY_ROOM) return false;
+  int16_t rawIndex = dressThemeAppliedRawIndex[category];
+  if (rawIndex < 0 || rawIndex >= (int16_t)dressThemeCount) return false;
+  if (dressThemes[rawIndex].category != category) return false;
+  outRawIndex = (uint16_t)rawIndex;
+  return true;
+}
+
+static void dressThemeBuildComponentRootPath(uint8_t category, const char* dirName, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  const char* safeDirName = dirName ? dirName : "";
+  snprintf(dst, dstSize, "%s/%s/\xe5\xae\xb6\xe5\x85\xb7", dressThemeRootForCategory(category), safeDirName);
+}
+
+static void dressThemeBuildThemeDirPath(uint8_t category, const char* dirName, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  const char* safeDirName = dirName ? dirName : "";
+  snprintf(dst, dstSize, "%s/%s", dressThemeRootForCategory(category), safeDirName);
+}
+
+static inline char dressThemeAsciiLower(char c) {
+  return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+}
+
+static bool dressThemeIsPngPath(const char* path) {
+  if (!path) return false;
+  const char* dot = strrchr(path, '.');
+  if (!dot) return false;
+  return dressThemeAsciiLower(dot[0]) == '.' &&
+         dressThemeAsciiLower(dot[1]) == 'p' &&
+         dressThemeAsciiLower(dot[2]) == 'n' &&
+         dressThemeAsciiLower(dot[3]) == 'g' &&
+         dot[4] == 0;
+}
+
+static bool dressThemeLooksLikeThumbFile(const char* path) {
+  const char* base = dressThemeBasename(path);
+  return base &&
+         base[0] == '0' &&
+         base[1] == '0' &&
+         base[2] == '0' &&
+         base[3] == '_' &&
+         dressThemeIsPngPath(base);
+}
+
+static void dressThemeResolveChildPath(const char* parent, const char* childName, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  dst[0] = 0;
+  if (!childName || !childName[0]) {
+    return;
+  }
+  const char* childBase = dressThemeBasename(childName);
+  if (parent && parent[0]) {
+    snprintf(dst, dstSize, "%s/%s", parent, (childBase && childBase[0]) ? childBase : childName);
+    return;
+  }
+  dressThemeCopyName(dst, dstSize, childName);
+}
+
+static void dressThemeComponentDisplayName(const char* path, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  char tmp[96];
+  dressThemeCopyName(tmp, sizeof(tmp), dressThemeBasename(path));
+  char* dot = strrchr(tmp, '.');
+  if (dot) *dot = 0;
+  char* split = strchr(tmp, '_');
+  const char* src = (split && split[1] != 0) ? (split + 1) : tmp;
+  dressThemeCopyName(dst, dstSize, src);
+}
+
+static void dressThemeResetComponentList() {
+  dressThemeComponentCount = 0;
+  dressThemeComponentSelected = 0;
+  dressThemeComponentScroll = 0;
+}
+
+static bool dressThemeAppendComponent(const char* path) {
+  if (!path || !path[0]) return false;
+  if (dressThemeComponentCount >= DRESS_THEME_COMPONENT_MAX) return false;
+  DressThemeComponentEntry& entry = dressThemeComponents[dressThemeComponentCount++];
+  dressThemeCopyName(entry.path, sizeof(entry.path), path);
+  dressThemeComponentDisplayName(path, entry.label, sizeof(entry.label));
+  return true;
+}
+
+static void dressThemeScanComponentsRecursive(fs::FS& fs, const char* dirPath, uint8_t depth = 0) {
+  if (!dirPath || !dirPath[0] || dressThemeComponentCount >= DRESS_THEME_COMPONENT_MAX || depth > 6) return;
+
+  File dir = fs.open(dirPath);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return;
+  }
+
+  while (dressThemeComponentCount < DRESS_THEME_COMPONENT_MAX) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+
+    char childPath[224];
+    dressThemeResolveChildPath(dirPath, entry.name(), childPath, sizeof(childPath));
+    bool isDir = entry.isDirectory();
+    entry.close();
+
+    if (isDir) {
+      dressThemeScanComponentsRecursive(fs, childPath, depth + 1);
+    } else if (dressThemeIsPngPath(childPath)) {
+      dressThemeAppendComponent(childPath);
+    }
+  }
+
+  dir.close();
+}
+
+static void dressThemeReleaseVisibleThumbCache() {
+  for (uint8_t i = 0; i < DRESS_THEME_THUMB_WINDOW_MAX; ++i) {
+    if (dressThemeThumbWindow[i].pixels) {
+      free(dressThemeThumbWindow[i].pixels);
+      dressThemeThumbWindow[i].pixels = nullptr;
+    }
+    dressThemeThumbWindow[i].rawIndex = -1;
+    dressThemeThumbWindow[i].w = 0;
+    dressThemeThumbWindow[i].h = 0;
+  }
+  dressThemeThumbWindowScroll = 0xFFFF;
+  dressThemeThumbWindowCount = 0;
+  dressThemeThumbWindowW = 0;
+  dressThemeThumbWindowH = 0;
+}
+
+static void dressThemeFocusAppliedForCurrentScene() {
+  uint8_t category = dressThemeCategoryForScene(currentScene);
+  uint16_t rawIndex = 0;
+  if (!dressThemeAppliedRawIndexForCategory(category, rawIndex)) return;
+  for (uint16_t i = 0; i < dressThemeFilteredCount; ++i) {
+    if (dressThemeFiltered[i] != rawIndex) continue;
+    dressThemeSelected = i;
+    uint16_t nextScroll = dressThemePageStartForIndex(dressThemeSelected);
+    if (nextScroll != dressThemeScroll) {
+      dressThemeReleaseVisibleThumbCache();
+      dressThemeScroll = nextScroll;
+    }
+    return;
+  }
+}
+
+static void dressThemeEnsureThumbCache(uint8_t category) {
+  dressThemeEnsureCatalog();
+  if (category > DRESS_THEME_CATEGORY_ROOM) return;
+  if (dressThemeThumbCacheReady[category]) return;
+
+  fs::FS* fs = dressThemeAssetFS();
+
+  for (uint16_t i = 0; i < dressThemeCount; ++i) {
+    if (dressThemes[i].category != category) continue;
+    dressThemeThumbPath[i][0] = 0;
+    if (fs) {
+      char rawPreviewPath[280];
+      dressThemeBuildPreviewRgb565Path(category, dressThemes[i].dirName, rawPreviewPath, sizeof(rawPreviewPath));
+      File rawPreview = fs->open(rawPreviewPath, FILE_READ);
+      if (rawPreview) {
+        rawPreview.close();
+        dressThemeCopyName(dressThemeThumbPath[i], sizeof(dressThemeThumbPath[i]), rawPreviewPath);
+      }
+    }
+
+    if (fs && dressThemeThumbPath[i][0] == 0) {
+      char fixedThumbPath[280];
+      dressThemeBuildThumbPath(category, dressThemes[i].dirName, fixedThumbPath, sizeof(fixedThumbPath));
+      File fixedThumb = fs->open(fixedThumbPath, FILE_READ);
+      if (fixedThumb) {
+        fixedThumb.close();
+        dressThemeCopyName(dressThemeThumbPath[i], sizeof(dressThemeThumbPath[i]), fixedThumbPath);
+      }
+    }
+
+    if (fs && dressThemeThumbPath[i][0] == 0) {
+      char themeDirPath[280];
+      dressThemeBuildThemeDirPath(category, dressThemes[i].dirName, themeDirPath, sizeof(themeDirPath));
+      File dir = fs->open(themeDirPath);
+      if (dir && dir.isDirectory()) {
+        while (true) {
+          File entry = dir.openNextFile();
+          if (!entry) break;
+
+          char childPath[280];
+          dressThemeResolveChildPath(themeDirPath, entry.name(), childPath, sizeof(childPath));
+          bool isDir = entry.isDirectory();
+          entry.close();
+
+          if (!isDir && dressThemeLooksLikeThumbFile(childPath)) {
+            File thumbFile = fs->open(childPath, FILE_READ);
+            if (thumbFile) {
+              thumbFile.close();
+              dressThemeCopyName(dressThemeThumbPath[i], sizeof(dressThemeThumbPath[i]), childPath);
+              break;
+            }
+          }
+        }
+      }
+      if (dir) dir.close();
+    }
+
+    dressThemeThumbAvailable[i] = dressThemeThumbPath[i][0] != 0;
+    dressThemeThumbKnown[i] = true;
+  }
+  dressThemeThumbCacheReady[category] = true;
+}
+
+static inline void dressThemeInvalidateFiltered() {
+  dressThemeFilteredDirty = true;
+  dressThemeReleaseVisibleThumbCache();
+}
+
+static void dressThemeRebuildFiltered() {
+  dressThemeEnsureCatalog();
+
+  uint8_t category = dressThemeCategoryForScene(currentScene);
+  if (!dressThemeFilteredDirty && dressThemeFilteredCategory == category) return;
+
+  dressThemeFilteredCount = 0;
+  dressThemeFilteredCategory = category;
+  if (!dressThemeRootAvailable(category)) {
+    dressThemeSelected = 0;
+    dressThemeScroll = 0;
+    dressThemeFilteredDirty = false;
+    return;
+  }
+  dressThemeEnsureThumbCache(category);
+  for (uint16_t i = 0; i < dressThemeCount && dressThemeFilteredCount < DRESS_THEME_MAX; ++i) {
+    if (dressThemes[i].category != category) continue;
+    if (!dressThemeThumbKnown[i] || !dressThemeThumbAvailable[i]) continue;
+    dressThemeFiltered[dressThemeFilteredCount++] = i;
+  }
+
+  if (dressThemeFilteredCount == 0) {
+    dressThemeSelected = 0;
+    dressThemeScroll = 0;
+    dressThemeFilteredDirty = false;
+    return;
+  }
+
+  if (dressThemeSelected >= dressThemeFilteredCount) dressThemeSelected = dressThemeFilteredCount - 1;
+  uint16_t nextScroll = dressThemePageStartForIndex(dressThemeSelected);
+  uint16_t maxScroll = dressThemeMaxScrollForCount(dressThemeFilteredCount);
+  if (nextScroll > maxScroll) nextScroll = maxScroll;
+  if (nextScroll != dressThemeScroll) {
+    dressThemeReleaseVisibleThumbCache();
+    dressThemeScroll = nextScroll;
+  }
+  dressThemeFilteredDirty = false;
+}
+
+static bool dressThemeRawIndexAtFiltered(uint16_t filteredIndex, uint16_t& outRawIndex) {
+  if (filteredIndex >= dressThemeFilteredCount) return false;
+  uint16_t rawIndex = dressThemeFiltered[filteredIndex];
+  if (rawIndex >= dressThemeCount) return false;
+  outRawIndex = rawIndex;
+  return true;
+}
+
+static void dressThemeBuildThumbPath(uint8_t category, const char* dirName, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  const char* safeDirName = dirName ? dirName : "";
+  snprintf(dst, dstSize, "%s/%s/%s", dressThemeRootForCategory(category), safeDirName, DRESS_THEME_THUMB_NAME);
+}
+
+static void dressThemeBuildPreviewRgb565Path(uint8_t category, const char* dirName, char* dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  const char* safeDirName = dirName ? dirName : "";
+  snprintf(dst, dstSize, "%s/%s/%s", dressThemeRootForCategory(category), safeDirName, DRESS_THEME_PREVIEW_RGB565_NAME);
+}
+
+static bool dressThemeThumbPathAtRawIndex(uint16_t rawIndex, const char*& outPath) {
+  if (rawIndex >= dressThemeCount) return false;
+  uint8_t category = dressThemes[rawIndex].category;
+  dressThemeEnsureThumbCache(category);
+  if (!dressThemeThumbKnown[rawIndex] || !dressThemeThumbAvailable[rawIndex]) return false;
+  if (dressThemeThumbPath[rawIndex][0] == 0) return false;
+  fs::FS* fs = dressThemeAssetFS();
+  if (!fs) return false;
+
+  File thumbFile = fs->open(dressThemeThumbPath[rawIndex], FILE_READ);
+  if (!thumbFile) {
+    dressThemeThumbKnown[rawIndex] = false;
+    dressThemeThumbAvailable[rawIndex] = false;
+    dressThemeThumbPath[rawIndex][0] = 0;
+    dressThemeThumbCacheReady[category] = false;
+    dressThemeEnsureThumbCache(category);
+    if (!dressThemeThumbKnown[rawIndex] || !dressThemeThumbAvailable[rawIndex]) return false;
+    if (dressThemeThumbPath[rawIndex][0] == 0) return false;
+    thumbFile = fs->open(dressThemeThumbPath[rawIndex], FILE_READ);
+    if (!thumbFile) return false;
+  }
+  thumbFile.close();
+  outPath = dressThemeThumbPath[rawIndex];
+  return true;
+}
+
+static bool dressThemeCanScrollPrev() {
+  return dressThemeFilteredCount > 0 && dressThemeScroll > 0;
+}
+
+static bool dressThemeCanScrollNext() {
+  return dressThemeFilteredCount > 0 &&
+         ((uint32_t)dressThemeScroll + (uint32_t)dressThemeVisibleSlots()) < dressThemeFilteredCount;
+}
+
+static bool dressThemeScrollBy(int delta) {
+  dressThemeRebuildFiltered();
+  if (dressThemeFilteredCount == 0 || delta == 0) return false;
+
+  int next = (int)dressThemeScroll + delta * (int)dressThemeVisibleSlots();
+  int maxScroll = (int)dressThemeMaxScrollForCount(dressThemeFilteredCount);
+  uint16_t nextScroll = (uint16_t)clampi(next, 0, maxScroll);
+  if (nextScroll == dressThemeScroll) return false;
+
+  dressThemeReleaseVisibleThumbCache();
+  dressThemeScroll = nextScroll;
+  dressThemeSelected = dressThemeScroll;
+
+  uint16_t rawIndex = 0;
+  if (dressThemeRawIndexAtFiltered(dressThemeSelected, rawIndex)) {
+    uint8_t category = dressThemes[rawIndex].category;
+    if (category <= DRESS_THEME_CATEGORY_ROOM) dressThemeAppliedRawIndex[category] = (int16_t)rawIndex;
+  }
+  return true;
+}
+
+static bool dressThemeSelectFilteredIndex(uint16_t filteredIndex) {
+  dressThemeRebuildFiltered();
+  if (filteredIndex >= dressThemeFilteredCount) return false;
+  dressThemeSelected = filteredIndex;
+
+  uint16_t nextScroll = dressThemePageStartForIndex(dressThemeSelected);
+  if (nextScroll != dressThemeScroll) {
+    dressThemeReleaseVisibleThumbCache();
+    dressThemeScroll = nextScroll;
+  }
+
+  uint16_t rawIndex = 0;
+  if (!dressThemeRawIndexAtFiltered(filteredIndex, rawIndex)) return false;
+  uint8_t category = dressThemes[rawIndex].category;
+  if (category <= DRESS_THEME_CATEGORY_ROOM) dressThemeAppliedRawIndex[category] = (int16_t)rawIndex;
+  return true;
+}
+
+static bool dressThemeMoveSelection(int delta) {
+  dressThemeRebuildFiltered();
+  if (dressThemeFilteredCount == 0 || delta == 0) return false;
+  int next = clampi((int)dressThemeSelected + delta, 0, (int)dressThemeFilteredCount - 1);
+  if (next == (int)dressThemeSelected) return false;
+  return dressThemeSelectFilteredIndex((uint16_t)next);
+}
+
+static void dressThemeRebuildComponents() {
+  if (!dressThemeComponentListDirty) return;
+  dressThemeComponentListDirty = false;
+  dressThemeResetComponentList();
+
+  if (dressThemeComponentThemeRawIndex < 0 || dressThemeComponentThemeRawIndex >= (int16_t)dressThemeCount) return;
+  fs::FS* fs = dressThemeAssetFS();
+  if (!fs) return;
+
+  const DressThemeEntry& theme = dressThemes[dressThemeComponentThemeRawIndex];
+  char rootPath[280];
+  dressThemeBuildComponentRootPath(theme.category, theme.dirName, rootPath, sizeof(rootPath));
+  if (!fs->exists(rootPath)) return;
+
+  dressThemeScanComponentsRecursive(*fs, rootPath);
+}
+
+static bool dressThemeComponentCanScrollPrev() {
+  return dressThemeComponentCount > 0 && dressThemeComponentScroll > 0;
+}
+
+static bool dressThemeComponentCanScrollNext() {
+  return dressThemeComponentCount > 0 &&
+         ((uint32_t)dressThemeComponentScroll + (uint32_t)dressThemeVisibleSlots()) < dressThemeComponentCount;
+}
+
+static bool dressThemeSelectComponentIndex(uint16_t index) {
+  dressThemeRebuildComponents();
+  if (index >= dressThemeComponentCount) return false;
+  dressThemeComponentSelected = index;
+  dressThemeComponentScroll = dressThemePageStartForIndex(dressThemeComponentSelected);
+  return true;
+}
+
+static bool dressThemeMoveComponentSelection(int delta) {
+  dressThemeRebuildComponents();
+  if (dressThemeComponentCount == 0 || delta == 0) return false;
+  int next = clampi((int)dressThemeComponentSelected + delta, 0, (int)dressThemeComponentCount - 1);
+  if (next == (int)dressThemeComponentSelected) return false;
+  return dressThemeSelectComponentIndex((uint16_t)next);
+}
+
+static bool dressThemeComponentScrollBy(int delta) {
+  dressThemeRebuildComponents();
+  if (dressThemeComponentCount == 0 || delta == 0) return false;
+
+  int next = (int)dressThemeComponentScroll + delta * (int)dressThemeVisibleSlots();
+  int maxScroll = (int)dressThemeMaxScrollForCount(dressThemeComponentCount);
+  uint16_t nextScroll = (uint16_t)clampi(next, 0, maxScroll);
+  if (nextScroll == dressThemeComponentScroll) return false;
+
+  dressThemeComponentScroll = nextScroll;
+  dressThemeComponentSelected = dressThemeComponentScroll;
+  return true;
+}
+
+static bool dressThemeSelectVisibleComponentSlot(uint8_t slot) {
+  uint16_t componentIndex = dressThemeComponentScroll + slot;
+  return dressThemeSelectComponentIndex(componentIndex);
+}
+
+static bool dressThemeOpenSelectedComponents() {
+  dressThemeRebuildFiltered();
+  uint16_t rawIndex = 0;
+  if (!dressThemeRawIndexAtFiltered(dressThemeSelected, rawIndex)) return false;
+  dressThemeReleaseVisibleThumbCache();
+  dressThemeComponentThemeRawIndex = (int16_t)rawIndex;
+  dressThemePanelView = DRESS_THEME_VIEW_COMPONENTS;
+  dressThemeComponentListDirty = true;
+  dressThemeRebuildComponents();
+  return true;
+}
+
+static bool dressThemeSelectVisibleSlot(uint8_t slot) {
+  uint16_t filteredIndex = dressThemeScroll + slot;
+  return dressThemeSelectFilteredIndex(filteredIndex);
 }
 static RuntimeSingleSpriteCache* runtimeSingleCacheEntry(BeansAssets::AssetId assetId) {
   for (size_t i = 0; i < (sizeof(runtimeSingleCaches) / sizeof(runtimeSingleCaches[0])); ++i) {
@@ -2693,6 +3368,11 @@ static void runtimeAssetsInit() {
   resetRuntimeAssetCaches();
 
   fs::FS* primaryFs = runtimeAssetFS();
+  if (!primaryFs && !sdReady) {
+    Serial.println("[ASSET] runtime FS unavailable, retrying SD init");
+    sdInit();
+    primaryFs = runtimeAssetFS();
+  }
   if (!primaryFs) {
     Serial.println("[ASSET] runtime FS unavailable");
     strncpy(bootAssetNotice, "Missing runtime assets: no FS", sizeof(bootAssetNotice) - 1);
@@ -2711,6 +3391,12 @@ static void runtimeAssetsInit() {
 
   if (!assetsMounted && primaryFs != &SD && sdReady) {
     assetsMounted = tryRuntimeAssetFs(SD, "SD fallback");
+  }
+  if (!assetsMounted) {
+    bool retriedSd = sdInit();
+    if (retriedSd) {
+      assetsMounted = tryRuntimeAssetFs(SD, "SD reinit");
+    }
   }
   if (!assetsMounted && saveReady && primaryFs != &saveFS) {
     assetsMounted = tryRuntimeAssetFs(saveFS, "saveFS fallback");

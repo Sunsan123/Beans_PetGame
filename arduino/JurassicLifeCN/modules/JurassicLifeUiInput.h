@@ -36,6 +36,141 @@ static void toggleInteractionMenu(uint32_t now) {
   uiForceBands = true;
 }
 
+static void enterDressMode() {
+  closeInteractionMenu();
+  appMode = MODE_DRESS;
+  dressTab = DRESS_TAB_THEME;
+  dressThemePanelOpen = false;
+  dressThemeInvalidateFiltered();
+  dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+  dressThemeComponentThemeRawIndex = -1;
+  dressThemeComponentListDirty = true;
+  dressThemeReleaseVisibleThumbCache();
+  if (dressThemeGallery.getBuffer()) dressThemeGallery.deleteSprite();
+  if (dressThemePreview.getBuffer()) dressThemePreview.deleteSprite();
+  dressThemeGalleryW = 0;
+  dressThemeGalleryH = 0;
+  dressThemeGalleryDirty = true;
+  dressThemeGalleryLowMemMode = false;
+  dressThemePreviewW = 0;
+  dressThemePreviewH = 0;
+  dressThemePreviewDirty = true;
+  dressThemePreviewRawIndex = -1;
+  dressThemePreviewCategory = 0xFF;
+  uiSel = 0;
+  uiSpriteDirty = true;
+  uiForceBands = true;
+}
+
+static void leaveDressMode() {
+  appMode = MODE_PET;
+  dressThemePanelOpen = false;
+  dressThemeInvalidateFiltered();
+  dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+  dressThemeComponentThemeRawIndex = -1;
+  dressThemeComponentListDirty = true;
+  dressThemeReleaseVisibleThumbCache();
+  if (dressThemeGallery.getBuffer()) dressThemeGallery.deleteSprite();
+  if (dressThemePreview.getBuffer()) dressThemePreview.deleteSprite();
+  dressThemeGalleryW = 0;
+  dressThemeGalleryH = 0;
+  dressThemeGalleryDirty = true;
+  dressThemeGalleryLowMemMode = false;
+  dressThemePreviewW = 0;
+  dressThemePreviewH = 0;
+  dressThemePreviewDirty = true;
+  dressThemePreviewRawIndex = -1;
+  dressThemePreviewCategory = 0xFF;
+  uiSel = 1;
+  uiSpriteDirty = true;
+  uiForceBands = true;
+}
+
+static void handleDressButtonAction(uint8_t idx, uint32_t now) {
+  (void)now;
+  if (isDressThemeBrowseActive() && idx == 0) {
+    if (isDressThemeComponentViewActive()) {
+      dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+      dressThemeInvalidateFiltered();
+      dressThemeFocusAppliedForCurrentScene();
+      dressThemeComponentThemeRawIndex = -1;
+      dressThemeComponentListDirty = true;
+      dressThemeReleaseVisibleThumbCache();
+      dressThemeGalleryDirty = true;
+      uiSel = 0;
+    } else {
+      dressThemePanelOpen = false;
+      dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+      dressThemeComponentThemeRawIndex = -1;
+      dressThemeComponentListDirty = true;
+      dressThemeReleaseVisibleThumbCache();
+      if (dressThemeGallery.getBuffer()) dressThemeGallery.deleteSprite();
+      dressThemeGalleryW = 0;
+      dressThemeGalleryH = 0;
+      dressThemeGalleryDirty = true;
+      uiSel = 1;
+    }
+    uiSpriteDirty = true;
+    uiForceBands = true;
+    return;
+  }
+
+  switch (idx) {
+    case 0:
+      leaveDressMode();
+      break;
+    case 1:
+      dressTab = DRESS_TAB_THEME;
+      dressThemePanelOpen = true;
+      dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+      dressThemeReleaseVisibleThumbCache();
+      if (dressThemePreview.getBuffer()) dressThemePreview.deleteSprite();
+      dressThemePreviewW = 0;
+      dressThemePreviewH = 0;
+      dressThemePreviewRawIndex = -1;
+      dressThemePreviewCategory = 0xFF;
+      dressThemeInvalidateFiltered();
+      dressThemeRebuildFiltered();
+      dressThemeFocusAppliedForCurrentScene();
+      dressThemeGalleryDirty = true;
+      dressThemePreviewDirty = true;
+      uiSel = 0;
+      break;
+    case 2:
+      dressTab = DRESS_TAB_SINGLE;
+      dressThemePanelOpen = false;
+      dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+      dressThemeComponentThemeRawIndex = -1;
+      dressThemeComponentListDirty = true;
+      dressThemeReleaseVisibleThumbCache();
+      if (dressThemeGallery.getBuffer()) dressThemeGallery.deleteSprite();
+      dressThemeGalleryW = 0;
+      dressThemeGalleryH = 0;
+      dressThemeGalleryDirty = true;
+      dressThemePreviewDirty = true;
+      uiSel = 2;
+      break;
+    case 3:
+      dressTab = DRESS_TAB_PRESET;
+      dressThemePanelOpen = false;
+      dressThemePanelView = DRESS_THEME_VIEW_THEMES;
+      dressThemeComponentThemeRawIndex = -1;
+      dressThemeComponentListDirty = true;
+      dressThemeReleaseVisibleThumbCache();
+      if (dressThemeGallery.getBuffer()) dressThemeGallery.deleteSprite();
+      dressThemeGalleryW = 0;
+      dressThemeGalleryH = 0;
+      dressThemeGalleryDirty = true;
+      dressThemePreviewDirty = true;
+      uiSel = 3;
+      break;
+    default:
+      break;
+  }
+  uiSpriteDirty = true;
+  uiForceBands = true;
+}
+
 static void calcInteractionMenuRect(int& menuX, int& menuY, int& menuW, int& menuH) {
   const int menuCount = (int)interactionMenuCount();
   const int itemGap = 4;
@@ -95,8 +230,13 @@ static bool performUiAction(UiAction a, uint32_t now) {
       toggleInteractionMenu(now);
       return true;
     case UI_DRESS_MODE:
-      closeInteractionMenu();
-      setMsg("\xe8\xa3\x85\xe6\x89\xae\xe6\xa8\xa1\xe5\xbc\x8f\xe6\x95\xb4\xe7\x90\x86\xe4\xb8\xad", now, 1600);
+      if (task.active) {
+        setMsg("\xe5\xbd\x93\xe5\x89\x8d\xe6\xad\xa3\xe5\x9c\xa8\xe6\x89\xa7\xe8\xa1\x8c\xe5\xae\x89\xe6\x8e\x92!", now, 1400);
+        uiSpriteDirty = true;
+        uiForceBands = true;
+        return false;
+      }
+      enterDressMode();
       return true;
     case UI_DRESS_SHOP:
       closeInteractionMenu();
@@ -137,7 +277,16 @@ static void handleEncoderUI(uint32_t now) {
   uint8_t nbtn = uiButtonCount();
 
   while (dd < 0) {
-    if (interactionMenuOpen && uiSel == 0) {
+    if (isDressThemeComponentViewActive()) {
+      if (dressThemeMoveComponentSelection(-1)) {
+        dressThemeGalleryDirty = true;
+      }
+    } else if (isDressThemeListViewActive()) {
+      if (dressThemeMoveSelection(-1)) {
+        dressThemeGalleryDirty = true;
+        dressThemePreviewDirty = true;
+      }
+    } else if (interactionMenuOpen && uiSel == 0) {
       if (interactionMenuSel > 0) interactionMenuSel--;
     } else if (uiShowSceneArrows() && uiSel == 0) {
       switchSceneByOffset(-1, now);
@@ -150,7 +299,16 @@ static void handleEncoderUI(uint32_t now) {
     uiForceBands  = true;
   }
   while (dd > 0) {
-    if (interactionMenuOpen && uiSel == 0) {
+    if (isDressThemeComponentViewActive()) {
+      if (dressThemeMoveComponentSelection(+1)) {
+        dressThemeGalleryDirty = true;
+      }
+    } else if (isDressThemeListViewActive()) {
+      if (dressThemeMoveSelection(+1)) {
+        dressThemeGalleryDirty = true;
+        dressThemePreviewDirty = true;
+      }
+    } else if (interactionMenuOpen && uiSel == 0) {
       if (interactionMenuSel + 1 < interactionMenuCount()) interactionMenuSel++;
       else if (nbtn > 1) { closeInteractionMenu(); uiSel = 1; }
     } else if (uiShowSceneArrows() && uiSel == (uint8_t)(nbtn - 1)) {
@@ -182,7 +340,16 @@ static void handleButtonsUI(uint32_t now) {
   uint8_t nbtn = uiButtonCount();
 
   if (btnLeftEdge) {
-    if (interactionMenuOpen && uiSel == 0) {
+    if (isDressThemeComponentViewActive()) {
+      if (dressThemeMoveComponentSelection(-1)) {
+        dressThemeGalleryDirty = true;
+      }
+    } else if (isDressThemeListViewActive()) {
+      if (dressThemeMoveSelection(-1)) {
+        dressThemeGalleryDirty = true;
+        dressThemePreviewDirty = true;
+      }
+    } else if (interactionMenuOpen && uiSel == 0) {
       if (interactionMenuSel > 0) interactionMenuSel--;
     } else if (uiShowSceneArrows() && uiSel == 0) {
       switchSceneByOffset(-1, now);
@@ -195,7 +362,16 @@ static void handleButtonsUI(uint32_t now) {
   }
 
   if (btnRightEdge) {
-    if (interactionMenuOpen && uiSel == 0) {
+    if (isDressThemeComponentViewActive()) {
+      if (dressThemeMoveComponentSelection(+1)) {
+        dressThemeGalleryDirty = true;
+      }
+    } else if (isDressThemeListViewActive()) {
+      if (dressThemeMoveSelection(+1)) {
+        dressThemeGalleryDirty = true;
+        dressThemePreviewDirty = true;
+      }
+    } else if (interactionMenuOpen && uiSel == 0) {
       if (interactionMenuSel + 1 < interactionMenuCount()) interactionMenuSel++;
       else if (nbtn > 1) { closeInteractionMenu(); uiSel = 1; }
     } else if (uiShowSceneArrows() && uiSel == (uint8_t)(nbtn - 1)) {
@@ -214,6 +390,12 @@ static void handleButtonsUI(uint32_t now) {
 
 // --- Action commune (encodeur + tactile) ---
 static void uiPressAction(uint32_t now) {
+  if (isDressModeActive()) {
+    if (uiSel >= dressButtonCount()) uiSel = dressTabButtonIndex(dressTab);
+    handleDressButtonAction(uiSel, now);
+    return;
+  }
+
   if (appMode != MODE_PET) return; // en mini-jeu, on ne clique pas l'UI gestion
 
   if (phase == PHASE_EGG) {
@@ -326,8 +508,7 @@ if (nbtn != uiAliveCount()) return;
       break;
 
     case UI_DRESS_MODE:
-      closeInteractionMenu();
-      setMsg("\xe8\xa3\x85\xe6\x89\xae\xe6\xa8\xa1\xe5\xbc\x8f\xe6\x95\xb4\xe7\x90\x86\xe4\xb8\xad", now, 1600);
+      enterDressMode();
       break;
 
     case UI_DRESS_SHOP:
@@ -364,7 +545,7 @@ if (nbtn != uiAliveCount()) return;
 }
 
 static void handleTouchUI(uint32_t now) {
-  if (appMode != MODE_PET) return; // en mini-jeu, on gère le tactile dans le mini-jeu si besoin
+  if (appMode != MODE_PET && appMode != MODE_DRESS) return; // mini-jeu et modal gèrent leur propre tactile
 
   int16_t x, y;
   bool down = readTouchRaw(x, y);
@@ -416,6 +597,7 @@ if (canTopBtns && ty >= (TOP_BTN_Y - TOP_BTN_TOUCH_PAD) && ty < (TOP_BTN_Y + TOP
 #endif
 
   if (touch.lastBtn != -10 && touch.lastBtn != -11) {
+  bool touchInDressGallery = false;
   if (interactionMenuOpen) {
     const int menuCount = (int)interactionMenuCount();
     const int itemGap = 4;
@@ -433,11 +615,39 @@ if (canTopBtns && ty >= (TOP_BTN_Y - TOP_BTN_TOUCH_PAD) && ty < (TOP_BTN_Y + TOP
     }
   }
 
-  if (touch.lastBtn < -29) {
+  if (touch.lastBtn == -1 && isDressModeActive() && dressThemePanelOpen && dressTab == DRESS_TAB_THEME) {
+    dressThemeRebuildFiltered();
+    if (isDressThemeComponentViewActive()) dressThemeRebuildComponents();
+    int galleryX = 0, galleryY = 0, galleryW = 0, galleryH = 0;
+    int arrowW = 0, cardX = 0, cardY = 0, cardW = 0, cardH = 0, cardGap = 0, labelH = 0;
+    uint8_t visibleSlots = 0;
+    calcDressThemeGalleryLayout(galleryX, galleryY, galleryW, galleryH, arrowW, cardX, cardY, cardW, cardH, cardGap, labelH, visibleSlots);
+
+    if (ty >= galleryY && ty < (galleryY + galleryH)) {
+      touchInDressGallery = true;
+      if (tx < (galleryX + arrowW)) {
+        if (isDressThemeComponentViewActive() ? dressThemeComponentCanScrollPrev() : dressThemeCanScrollPrev()) touch.lastBtn = -40;
+      } else if (tx >= (galleryX + galleryW - arrowW)) {
+        if (isDressThemeComponentViewActive() ? dressThemeComponentCanScrollNext() : dressThemeCanScrollNext()) touch.lastBtn = -41;
+      } else {
+        for (uint8_t slot = 0; slot < visibleSlots; ++slot) {
+          int xx = 0;
+          int yy = 0;
+          calcDressThemeGallerySlotRect(slot, cardX, cardY, cardW, cardH, cardGap, visibleSlots, xx, yy);
+          if (tx >= xx && tx < (xx + cardW) && ty >= yy && ty < (yy + cardH)) {
+            touch.lastBtn = (int8_t)(-60 - slot);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (touch.lastBtn <= -30 && touch.lastBtn > -40) {
     if (uiSel != 0) uiSel = 0;
     uiSpriteDirty = true;
     uiForceBands = true;
-  } else {
+  } else if (touch.lastBtn == -1 && !touchInDressGallery) {
   const int TOUCH_PAD_Y = UI_BOT_H; // zone tactile agrandie (haut+bas)
   if (ty >= (SH - UI_BOT_H - TOUCH_PAD_Y) && ty < (SH + TOUCH_PAD_Y)) {
     uint8_t nbtn = uiButtonCount();
@@ -504,7 +714,7 @@ if (touch.stableDown) {
     touch.longPressFired = false;
   }
 
-  if (!touch.longPressFired && touch.lastBtn >= 0 && uiButtonCount() == uiAliveCount()) {
+  if (!touch.longPressFired && appMode == MODE_PET && touch.lastBtn >= 0 && uiButtonCount() == uiAliveCount()) {
     UiAction heldAction = uiAliveActionAt((uint8_t)touch.lastBtn);
     if (heldAction == UI_AUDIO && (int32_t)(now - touch.pressStart) >= (int32_t)AUDIO_LONG_PRESS_MS) {
       audioVolumePercent = (audioVolumePercent >= 10) ? 1 : 10;
@@ -555,7 +765,50 @@ if (releasedEdge) {
     touch.pressBtn = -1;
     return;
   }
-  if (touch.lastBtn <= -30) {
+  if (touch.lastBtn == -40) {
+    if (isDressThemeComponentViewActive() ? dressThemeComponentScrollBy(-1) : dressThemeScrollBy(-1)) {
+      dressThemeGalleryDirty = true;
+      if (!isDressThemeComponentViewActive()) dressThemePreviewDirty = true;
+    }
+    touch.lastBtn = -1;
+    touch.pressBtn = -1;
+    uiSpriteDirty = true; uiForceBands = true;
+    return;
+  }
+  if (touch.lastBtn == -41) {
+    if (isDressThemeComponentViewActive() ? dressThemeComponentScrollBy(+1) : dressThemeScrollBy(+1)) {
+      dressThemeGalleryDirty = true;
+      if (!isDressThemeComponentViewActive()) dressThemePreviewDirty = true;
+    }
+    touch.lastBtn = -1;
+    touch.pressBtn = -1;
+    uiSpriteDirty = true; uiForceBands = true;
+    return;
+  }
+  if (touch.lastBtn <= -60) {
+    int slot = -60 - touch.lastBtn;
+    if (slot >= 0 && slot < (int)dressThemeVisibleSlots()) {
+      bool changed = false;
+      if (isDressThemeComponentViewActive()) {
+        changed = dressThemeSelectVisibleComponentSlot((uint8_t)slot);
+      } else if (isDressThemeListViewActive()) {
+        changed = dressThemeSelectVisibleSlot((uint8_t)slot);
+        if (changed) {
+          dressThemePreviewDirty = true;
+          dressThemeOpenSelectedComponents();
+        }
+      }
+      if (changed) {
+        dressThemeGalleryDirty = true;
+        uiSpriteDirty = true;
+        uiForceBands = true;
+      }
+    }
+    touch.lastBtn = -1;
+    touch.pressBtn = -1;
+    return;
+  }
+  if (touch.lastBtn <= -30 && touch.lastBtn > -40) {
     int menuIdx = -30 - touch.lastBtn;
     if (menuIdx >= 0 && menuIdx < (int)interactionMenuCount()) {
       interactionMenuSel = (uint8_t)menuIdx;
@@ -566,7 +819,7 @@ if (releasedEdge) {
     uiSpriteDirty = true; uiForceBands = true;
     return;
   }
-  if (touch.lastBtn == 0 && !interactionMenuOpen && uiButtonCount() == uiAliveCount()) {
+  if (appMode == MODE_PET && touch.lastBtn == 0 && !interactionMenuOpen && uiButtonCount() == uiAliveCount()) {
     toggleInteractionMenu(now);
     touch.lastBtn = -1;
     touch.pressBtn = -1;
@@ -576,7 +829,12 @@ if (releasedEdge) {
 
   if (touch.lastBtn >= 0) {
     uint8_t idx = (uint8_t)touch.lastBtn;
-    if (idx < uiAliveCount()) {
+    if (isDressModeActive()) {
+      if (idx < dressButtonCount()) {
+        uiSel = idx;
+        handleDressButtonAction(idx, now);
+      }
+    } else if (idx < uiAliveCount()) {
       uiSel = idx;
       (void)performUiAction(uiAliveActionAt(idx), now);
       uiSpriteDirty = true;

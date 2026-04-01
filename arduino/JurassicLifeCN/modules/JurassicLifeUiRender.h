@@ -355,6 +355,12 @@ const int TOP_BTN_PAD = 8;
       fg   = sel ? TFT_WHITE : TFT_BLACK;
       border = baseCol;
       if (hardBusy) disabledLook = true;
+    } else if (isDressModeActive()) {
+      lab = dressButtonLabel((uint8_t)i);
+      baseCol = dressButtonColor((uint8_t)i);
+      fill = sel ? baseCol : TFT_WHITE;
+      fg   = sel ? TFT_WHITE : TFT_BLACK;
+      border = baseCol;
     } else {
       UiAction a = uiAliveActionAt((uint8_t)i);
       baseCol = btnColorForAction(a);
@@ -536,14 +542,16 @@ static inline void overlayKeyedSpriteIntoBand(int dstYInBand, const uint16_t* sr
   }
 }
 static void overlayUIIntoBand(int bandY, int bh) {
-  int top0 = 0, top1 = UI_TOP_H;
-  int a0 = max(bandY, top0);
-  int a1 = min(bandY + bh, top1);
-  if (a1 > a0) {
-    int h = a1 - a0;
-    int srcY = a0 - top0;
-    int dstY = a0 - bandY;
-    overlayKeyedSpriteIntoBand(dstY, (uint16_t*)uiTop.getBuffer(), SW, UI_TOP_H, srcY, h);
+  if (!isDressModeActive()) {
+    int top0 = 0, top1 = UI_TOP_H;
+    int a0 = max(bandY, top0);
+    int a1 = min(bandY + bh, top1);
+    if (a1 > a0) {
+      int h = a1 - a0;
+      int srcY = a0 - top0;
+      int dstY = a0 - bandY;
+      overlayKeyedSpriteIntoBand(dstY, (uint16_t*)uiTop.getBuffer(), SW, UI_TOP_H, srcY, h);
+    }
   }
 
   int bot0 = SH - UI_BOT_H, bot1 = SH;

@@ -305,11 +305,18 @@ static inline bool runtimeSleepingFlag() {
 
 static bool sdInit() {
   sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  sdReady = SD.begin(SD_CS, sdSPI, 20000000);
+  const uint32_t kSdInitFreqs[] = { 20000000UL, 12000000UL, 8000000UL, 4000000UL };
+  sdReady = false;
+  for (uint8_t i = 0; i < (sizeof(kSdInitFreqs) / sizeof(kSdInitFreqs[0])); ++i) {
+    delay(20);
+    sdReady = SD.begin(SD_CS, sdSPI, kSdInitFreqs[i]);
+    if (sdReady) {
+      Serial.printf("[SD] init OK @ %lu Hz\n", (unsigned long)kSdInitFreqs[i]);
+      break;
+    }
+  }
   if (!sdReady) {
     Serial.println("[SD] init FAIL (pas de carte SD - normal si non utilisee)");
-  } else {
-    Serial.println("[SD] init OK");
   }
   return sdReady;
 }
